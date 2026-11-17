@@ -15,6 +15,7 @@
 import { HOT_CUE_COUNT, hotCueTime, sanitizeHotCues } from './cue-math.js';
 import { Q_FLAT, filterParams } from './filter-math.js';
 import { inLoop, planLoop, wrapIntoLoop } from './loop-math.js';
+import { looksLikeOutOfMemory } from './memory-guard.js';
 import { clamp, eqPositionToDb, faderToGain } from './mixer-math.js';
 import { estimatePosition, isNear } from './playhead-math.js';
 import { applyDelta } from './scratch-math.js';
@@ -27,6 +28,7 @@ const EQ_BANDS = {
 };
 const SMOOTH = 0.012; // setTargetAtTime constant for control changes
 const FILTER_SMOOTH = 0.02; // filter cutoff / resonance glide
+const BIG_DECODE_BYTES = 100 * 1024 * 1024; // decoded size from which a paused deck's old track is freed before decoding
 export const BEND_AMOUNT = 0.04; // pitch-bend buttons change the rate by 4 %
 const OFFSET_DECAY = 0.12; // seconds for the heard-position continuity offset to fade out
 const RELEASE_GAP = 0.008; // a scratch release only slides the display when it is more than this far (s) from the heard position
@@ -155,6 +157,11 @@ export class Deck extends EventTarget {
   }
 
   // ---- state ----------------------------------------------------------------------------
+
+  /** Counts loads; changes whenever a new load starts on this deck (lets callers tell if someone else loaded meanwhile). */
+  get loadToken() {
+    return this._loadToken;
+  }
 
   get loaded() {
     return this.track !== null;
@@ -306,10 +313,21 @@ export class Deck extends EventTarget {
   loadBlob(blob, meta, hooks = {}) {
     return this.loadChannels(
       async (isCurrent) => {
-        const bytes = await blob.arrayBuffer();
+        // The app may ask the user first about a very large file (js/audio/memory-guard.js); "no" cancels quietly.
+        // beforeDecode resolves false (cancel), true, or {estimateBytes} (what the decode is expected to need).
+        const answer = hooks.beforeDecode ? await hooks.beforeDecode(blob) : true;
+        if (answer === false) throw Object.assign(new Error('cancelled'), { cancelled: true });
+        if (!isCurrent()) return null;
+        // A BIG new track (over ~100 MB decoded) frees a paused deck's old one first: the old samples (up to
+        // ~230 MB for 10 minutes of stereo) would otherwise sit next to the decode buffer and our copy. A small
+        // one does not, so a corrupt or unsupported file never empties a deck that was fine.
+        if (answer && typeof answer === 'object' && answer.estimateBytes > BIG_DECODE_BYTES) this.releasePaused();
+        let bytes = await blob.arrayBuffer();
         let audio = await decode(this.ctx, bytes);
+        bytes = null; // the compressed file is no longer needed
         if (!isCurrent()) return null;
         if (!audio.length || !audio.numberOfChannels) throw new Error('The file contains no audio');
+        hooks.afterDecode?.({ duration: audio.duration, channels: audio.numberOfChannels, sampleRate: audio.sampleRate });
 
         // AudioBuffer storage cannot be transferred, so copy out once and drop the AudioBuffer.
         const length = audio.length;
@@ -373,15 +391,41 @@ export class Deck extends EventTarget {
       return { ok: true, duration, prepared };
     } catch (err) {
       if (!isCurrent()) return { ok: false, superseded: true };
-      const message = (err && err.message) || 'unsupported or corrupt audio file';
+      if (err && err.cancelled) return { ok: false, cancelled: true };
+      const oom = looksLikeOutOfMemory(err);
+      const message = oom
+        ? 'Not enough memory to open this file. Try a shorter one (under about 15 minutes).'
+        : (err && err.message) || 'unsupported or corrupt audio file';
       this._emit('error', { message });
-      return { ok: false, message };
+      return { ok: false, message, oom };
     } finally {
       if (isCurrent()) {
         this.loading = false;
         this._emit('loading', { loading: false });
       }
     }
+  }
+
+  /**
+   * Unload the current track when it is not audible (paused, not held), so its samples are freed before a
+   * replacement is decoded. A playing deck keeps its track until the new one is ready (it fades out and swaps).
+   * Returns whether anything was freed. The deck is empty afterwards; if the new load fails it stays empty.
+   */
+  releasePaused() {
+    if (!this.track || this.playing || this.grabbed) return false;
+    this._post({ type: 'unload' });
+    this.track = null;
+    this.cue = 0;
+    this.grid = null;
+    this.analyzing = false;
+    this.hotCues = new Array(HOT_CUE_COUNT).fill(null);
+    this.loop = null;
+    this._report = null;
+    this._emit('track', { track: null });
+    this._emit('hotcues', { hotCues: this.hotCues, persist: false });
+    this._emit('loop', { loop: null, reason: 'unload' });
+    this._emit('grid', { grid: null, persist: false });
+    return true;
   }
 
   // ---- transport ------------------------------------------------------------------------

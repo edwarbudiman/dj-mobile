@@ -95,12 +95,12 @@ README.md
 - [x] 4.1 Per-deck filter knob (LP/HP sweep) and hot cues (4 per deck, persisted)
 - [x] 4.2 Loop: auto-loop 1/2/4/8 beats (needs grid), exit
 - [x] 4.3 Optional split-mono headphone cue with per-deck CUE buttons and cue/master mix
-- [ ] 4.4 PWA: manifest, icons, service worker precache with versioned cache, works offline after first load, update flow does not strand old cache
-- [ ] 4.5 iOS quirks: silent-switch workaround, `interrupted` state recovery, safe-area insets, no double-tap zoom, wake lock where available
-- [ ] 4.6 Memory guard: warn on very long/large files; free previous buffer on reload; two decks of 10-min tracks must work on a phone
+- [x] 4.4 PWA: manifest, icons, service worker precache with versioned cache, works offline after first load, update flow does not strand old cache
+- [x] 4.5 iOS quirks: silent-switch workaround, `interrupted` state recovery, safe-area insets, no double-tap zoom, wake lock where available
+- [x] 4.6 Memory guard: warn on very long/large files; free previous buffer on reload; two decks of 10-min tracks must work on a phone
 - [x] 4.7 Built-in demo loops (synthesized in-app, two different BPMs) so the app is playable with zero files
-- [ ] 4.8 README: run locally, open on a phone (LAN + https options), install to home screen, controls guide, known limits
-- [ ] 4.9 Unit tests (`node --test tests/`) for bpm-core, peaks, crossfader curve, sync math, playhead math; all green
+- [x] 4.8 README: run locally, open on a phone (LAN + https options), install to home screen, controls guide, known limits
+- [x] 4.9 Unit tests (`node --test`, or `npm test`) for bpm-core, peaks, crossfader curve, sync math, playhead math; all green
 
 ## M5 — Final verification
 
@@ -113,8 +113,8 @@ README.md
 - [x] 6.1 `git init`, `.gitignore` (.vscode, node_modules, OS junk, .cert, review scratch, audio files), first commit
 - [x] 6.2 Public repo `edwarbudiman/dj-mobile` created and pushed with the existing gh login
 - [x] 6.3 Pages enabled from `main` branch root; empty `.nojekyll` present
-- [ ] 6.4 Every asset, worklet, worker, manifest and service-worker path is relative; manifest `start_url` and `scope` are `./`; app works under `/dj-mobile/`
-- [ ] 6.5 Commit and push after each milestone passes review (pushed: M1+M2, M3 · pending: M4, M5)
+- [x] 6.4 Every asset, worklet, worker, manifest and service-worker path is relative; manifest `start_url` and `scope` are `./`; app works under `/dj-mobile/`
+- [ ] 6.5 Commit and push after each milestone passes review (pushed: M1+M2, M3, M4 · pending: M5)
 - [ ] 6.6 Live check: https://edwarbudiman.github.io/dj-mobile/ returns 200, worklet and service worker load there
 - Rule: never push secrets or audio files. Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
@@ -138,3 +138,7 @@ README.md
 - M4A build 2: fixes in, 162 tests in ~14 s. Orchestrator browser smoke: Pads button always reads "Pads", page switch in the grid, 4 distinct hot-cue colours with numbered flags, both demos built with max rAF frame gap 15 ms (no visible stall). Awaiting reviewer-m4 round 2.
 - M4A round 2 (reviewer-m4): FAIL. Round-1 items verified; Worker path sound. New MAJOR M-2: loop fold misfires on Play from the loop start (heard position outside the loop for 60–130 ms). MINOR m-7 loop exit jump, m-8 hot-cue jump flash, m-9 demo worker timeout, m-10 mint hc4. Report: tests/_review/m4a-report-r2.md. Back to builder-m4.
 - M4A round 3 (reviewer-m4): PASS. Loop-aware heard position verified end to end (real processor → Deck) at 20/60/150 ms; m-7..m-10 fixed. 4.1, 4.2, 4.3, 4.7 closed, committed and pushed. Carry to part B: m-5 demo PCM cache (4.6), m-6 test command wording (4.9), demo-worker.js/demo-loader.js in the SW precache (4.4), README notes (fader = big moves, readout swipe = fine; loops need a grid; split cue needs a Y cable).
+- M4B build 1 (builder-m4): 4.4/4.5/4.6/4.8/4.9/6.4 implemented, 204 tests. Orchestrator browser check (Chrome, localhost): SW registered at scope ./, controls the page, cache dj-mobile-<hash> holds 46 files incl. worklet and both workers; manifest start_url/scope/id ./, 4 icons. With the server STOPPED (curl exit 7) a reload started the app offline, unlocked audio and loaded a demo at 122 BPM from cache. Awaiting reviewer-m4.
+- M4B round 1 (reviewer-m4): FAIL. MAJOR B-1: long MP3/AAC mixes under 60 MB load with no memory warning (45-min 128 kbps → ~2 GB peak). MINOR b-2 second window runs mixed versions after update, b-3 every in-scope navigation gets index.html, b-4 failed load empties paused deck, b-5 iOS silent loop runs forever / not restarted after interruption, b-6 restore can overwrite a user load, b-7 "Y-split" wording wrong (needs a stereo-to-dual-mono DJ splitter), b-8 estimate ignores resampling, b-9 update reload cuts playing music. Report: tests/_review/m4b-report.md. Back to builder-m4.
+- M4B build 2: all 9 items fixed, 211 tests, VERSION f9bff1610e. Orchestrator browser check of the update flow: new SW installed beside the old cache and waited, "Update ready: tap to reload" shown, tap → one reload, only dj-mobile-f9bff1610e cache remains, page controlled, bar gone. Awaiting reviewer-m4 round 2.
+- M4B round 2 (reviewer-m4): PASS. c-1 hardening (stored duration, 1.5 s metadata timeout, size-guess threshold 25 min) applied by builder-m4, 213 tests, SW VERSION 9d52ae5ad8. M4 closed, committed, pushed; builder-m4/reviewer-m4 tabs closed.

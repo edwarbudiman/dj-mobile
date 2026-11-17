@@ -8,7 +8,13 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="DJ Mobile">
+  <meta name="description" content="Two decks, scratching, a mixer and beat sync. Your music stays on your device.">
   <title>DJ Mobile</title>
+  <!-- every URL here is relative: the app is hosted under a sub-path (https://edwarbudiman.github.io/dj-mobile/) -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -29,6 +35,13 @@
   </div>
 
   <aside id="library" class="sheet" hidden></aside>
+  <aside id="confirm" class="sheet sheet-confirm" hidden></aside>
+
+  <!-- shown when a new version of the app has been downloaded and is waiting (js/pwa.js) -->
+  <div id="update-bar" class="update-bar" hidden>
+    <button type="button" id="update-reload" class="btn btn-update">Update ready: tap to reload</button>
+    <button type="button" id="update-later" class="btn btn-x" aria-label="Not now">✕</button>
+  </div>
 
   <div id="start-overlay" class="overlay">
     <div class="overlay-card">

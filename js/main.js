@@ -14,10 +14,14 @@ import { LOW_CONFIDENCE } from './audio/bpm-core.js';
 import { sanitizeHotCues } from './audio/cue-math.js';
 import { DEMOS, demoDuration } from './audio/demo-synth.js';
 import { buildDemo } from './audio/demo-loader.js';
+import { HEADER_BYTES, describeBeforeDecode, inspectAfterDecode, inspectBeforeDecode, parseAudioHeader, readMediaDuration } from './audio/memory-guard.js';
+import { createConfirm } from './ui/confirm.js';
+import { initPwa } from './pwa.js';
+import { createWakeLock } from './wake-lock.js';
 
 const $ = (id) => document.getElementById(id);
 const toast = createToaster($('toasts'));
-const engine = new Engine();
+let engine = new Engine(); // replaced by a fresh one if the system closes the audio context (see wireEngine)
 const library = new Library({ notify: (m) => toast(m, { kind: 'warn', ms: 6000 }) });
 const tempo = new TempoAnalyzer();
 const other = (id) => (id === 'A' ? 'B' : 'A');
@@ -143,7 +147,6 @@ async function handleFiles(files, target) {
 
 const isDemo = (id) => typeof id === 'string' && id.startsWith('demo:');
 const DEMO_META_PREFIX = 'dj-mobile.demo.';
-const demoPcm = new Map(); // id -> Promise<channels> (the app keeps one copy; every load gets its own, since the worklet takes ownership)
 
 function demoMeta(id) {
   try {
@@ -170,19 +173,17 @@ function demoItems() {
   }));
 }
 
-/** Loader for Deck.loadChannels: builds the demo once (a bar at a time, yielding to the UI), then hands out copies. */
+/**
+ * Loader for Deck.loadChannels. Nothing is cached: a demo is rendered on demand (in a Worker, so it costs the UI
+ * nothing) and its sample arrays go straight to the deck, which takes ownership of them. No second copy exists,
+ * no copy is made for the deck, and nothing stays in memory after a deck is reloaded.
+ */
 function demoProducer(id) {
   return async (isCurrent) => {
     const def = DEMOS.find((d) => d.id === id);
-    if (!demoPcm.has(id)) {
-      demoPcm.set(id, buildDemo(def).catch((err) => {
-        demoPcm.delete(id);
-        throw err;
-      }));
-    }
-    const pcm = await demoPcm.get(id);
+    const pcm = await buildDemo(def);
     if (!pcm || !isCurrent()) return null;
-    return { left: pcm.left.slice(), right: pcm.right.slice(), sampleRate: pcm.sampleRate, length: pcm.length, duration: pcm.duration };
+    return { left: pcm.left, right: pcm.right, sampleRate: pcm.sampleRate, length: pcm.length, duration: pcm.duration };
   };
 }
 
@@ -201,6 +202,45 @@ function saveMeta(id, patch) {
   library.update(id, patch);
 }
 
+// ---- memory guard: ask before decoding something huge, warn once after ---------------------------
+
+const confirmUi = createConfirm($('confirm'));
+let warnedDecodedSize = false;
+
+/**
+ * Resolves false (the user said no), or {estimateBytes}: what decoding is expected to need, so the deck can decide
+ * whether to free its old track first. The length comes from a WAV / AIFF header, else from the media metadata
+ * (an <audio> element reads it without decoding), else from a conservative size guess.
+ */
+async function askBeforeDecode(blob, item = null) {
+  // A library track whose length (and channel count) was stored on its first load needs no reading at all.
+  const known = item && item.duration > 0 ? { knownDuration: item.duration, knownChannels: item.channels } : null;
+  let header = null;
+  let mediaDuration = null;
+  if (!known) {
+    try {
+      header = parseAudioHeader(new Uint8Array(await blob.slice(0, HEADER_BYTES).arrayBuffer()), blob.size);
+    } catch {
+      header = null;
+    }
+    mediaDuration = header ? null : await readMediaDuration(blob);
+  }
+  const contextRate = engine.ctx ? engine.ctx.sampleRate : undefined; // decodeAudioData resamples to this
+  const info = inspectBeforeDecode({ size: blob.size, header, mediaDuration, ...known, contextRate });
+  if (info.warn) {
+    const text = describeBeforeDecode(blob.name || 'This file', info, blob.size);
+    if (!(await confirmUi.ask({ ...text, confirmText: 'Load anyway', cancelText: 'Cancel' }))) return false;
+  }
+  return { estimateBytes: info.estimateBytes };
+}
+
+function warnAfterDecode(info) {
+  const r = inspectAfterDecode(info);
+  if (!r.warn || warnedDecodedSize) return;
+  warnedDecodedSize = true;
+  toast(`That track needs about ${r.mb} MB of memory. If the app slows down or closes, try shorter tracks.`, { kind: 'warn', ms: 8000 });
+}
+
 /** `source` is a Blob (a stored file) or a producer function (a demo). */
 async function loadIntoDeck(deckId, source, item) {
   const deck = engine.decks[deckId];
@@ -212,16 +252,27 @@ async function loadIntoDeck(deckId, source, item) {
   const stored = item.bpm > 0 && Number.isFinite(item.beatOffset);
   const hooks = {
     beforeTransfer: (channels, ctl) => prepareTrack(channels, { needBpm: !stored }, () => !ctl.isCurrent()),
+    beforeDecode: (blob) => askBeforeDecode(blob, item),
+    afterDecode: (info) => {
+      warnAfterDecode(info);
+      if (!isDemo(item.id) && item.channels == null) {
+        item.channels = info.channels; // next time the memory check can skip reading the file
+        library.update(item.id, { channels: info.channels });
+      }
+    },
   };
   const meta = { name: item.name, libraryId: item.id };
-  const res =
-    typeof source === 'function'
-      ? await deck.loadChannels(source, meta, { ...hooks, label: 'Building demo…' })
-      : await deck.loadBlob(source, meta, hooks);
-  if (res.superseded) return;
+  let res;
+  if (typeof source === 'function') {
+    res = await deck.loadChannels(source, meta, { ...hooks, label: 'Building demo…' });
+  } else {
+    res = await deck.loadBlob(source, meta, hooks);
+  }
+  if (res.superseded || res.cancelled) return; // cancelled: the user said no to the memory warning; nothing changed
   if (!res.ok) {
-    toast("Can't play this file (corrupt or unsupported format)", { kind: 'error', ms: 7000 });
-    return; // the old track stays loaded, and its analysis keeps running untouched
+    // (the deck already told the user about an out-of-memory failure; a paused deck's old track was freed first)
+    if (!res.oom) toast("Can't play this file (corrupt or unsupported format)", { kind: 'error', ms: 7000 });
+    return;
   }
   cancelAnalysis(deckId); // only now is the previous track's analysis obsolete
   deckViews[deckId].setPeaks(res.prepared.peaks);
@@ -455,54 +506,179 @@ const overlay = $('start-overlay');
 const startBtn = $('start-btn');
 const startMsg = $('start-msg');
 const startTitle = $('start-title');
-let started = false;
+let started = false; // an engine has been started at least once
+let wired = false; // the CURRENT engine's decks are attached to the views
+let restore = null; // what to put back after the system closed the audio engine
+const wake = createWakeLock();
+const anyPlaying = () => Object.values(engine.decks).some((d) => d.playing);
+const updateWake = () => {
+  const playing = anyPlaying();
+  wake.update(playing); // the screen stays on while playing
+  engine.setPlaying(playing); // iOS silent-switch loop runs only while playing
+};
 
 function showOverlay(mode, message) {
   overlay.hidden = false;
   overlay.dataset.mode = mode;
   startBtn.hidden = mode === 'unsupported';
   startBtn.disabled = mode === 'busy';
-  startTitle.textContent = mode === 'unsupported' ? 'Audio not available' : mode === 'resume' ? 'Audio paused' : 'DJ Mobile';
-  startBtn.textContent = mode === 'busy' ? 'Starting…' : mode === 'resume' ? 'Tap to resume' : 'Tap to start';
+  startTitle.textContent =
+    mode === 'unsupported' ? 'Audio not available' : mode === 'resume' ? 'Audio paused' : mode === 'restart' ? 'Audio was reset' : 'DJ Mobile';
+  startBtn.textContent = mode === 'busy' ? 'Starting…' : mode === 'resume' ? 'Tap to resume' : mode === 'restart' ? 'Tap to restart' : 'Tap to start';
   startMsg.textContent = message || '';
+}
+
+/** Attach the (new) engine's decks to the views and listen for its state changes. */
+function wireEngine() {
+  for (const id of ['A', 'B']) {
+    const deck = engine.decks[id];
+    deckViews[id].attach(deck);
+    deck.addEventListener('error', (e) => toast(e.detail.message, { kind: 'error' }));
+    deck.addEventListener('grab', (e) => onGrabChange(deck, e));
+    deck.addEventListener('hotcues', (e) => {
+      if (e.detail.persist) persistHotCues(deck);
+    });
+    deck.addEventListener('loop', (e) => {
+      if (e.detail.reason === 'scratch') toast(`Loop on deck ${deck.id} ended: you let go outside it.`, { ms: 3000 });
+    });
+    deck.addEventListener('grid', (e) => {
+      updateSyncButtons();
+      if (e.detail.persist) persistGrid(deck, e.detail.grid);
+    });
+    deck.addEventListener('playstate', updateWake);
+    deck.addEventListener('track', (e) => {
+      if (!e.detail.track) cancelAnalysis(deck.id); // a paused deck was emptied to free memory for the next load
+    });
+  }
+  applyMixer();
+  engine.addEventListener('blocked', () => {
+    releaseAllGrabs('blocked');
+    showOverlay('resume', 'Tap to bring the sound back.');
+  });
+  engine.addEventListener('running', () => {
+    overlay.hidden = true;
+  });
+  // The system closed the audio context (iOS may after a long interruption). A closed context cannot be
+  // reopened and the samples inside its decks are gone, so: remember what was loaded, build a fresh engine on the
+  // next tap (a gesture is required anyway) and reload those tracks from the library, paused at their old position.
+  engine.addEventListener('closed', () => {
+    restore = snapshotDecks(engine);
+    releaseAllGrabs('closed');
+    for (const id of ['A', 'B']) cancelAnalysis(id);
+    wake.update(false);
+    engine = new Engine();
+    engine.splitCue = mixer.split;
+    wired = false;
+    showOverlay(
+      'restart',
+      restore.A || restore.B
+        ? 'The system reset the audio engine. Tap to restart; your tracks reload from the library.'
+        : 'The system reset the audio engine. Tap to restart.',
+    );
+  });
+}
+
+function snapshotDecks(e) {
+  const out = { A: null, B: null };
+  for (const id of ['A', 'B']) {
+    const d = e.decks[id];
+    if (d && d.loaded && d.track.libraryId) {
+      out[id] = { libraryId: d.track.libraryId, name: d.track.name, position: d.position, pitch: d.pitch, range: d.pitchRange };
+    }
+  }
+  return out;
+}
+
+/** One deck after the other (so two big tracks are never decoded at once). */
+async function restoreDecks(snap) {
+  const eng = engine;
+  // a deck the user loads something onto while the restore is still busy keeps what the user chose
+  const startTokens = { A: eng.decks.A.loadToken, B: eng.decks.B.loadToken };
+  const untouched = (id) => engine === eng && eng.decks[id].loadToken === startTokens[id];
+  for (const id of ['A', 'B']) {
+    const s = snap[id];
+    if (!s || !untouched(id)) continue;
+    const item = [...demoItems(), ...(await library.list())].find((t) => t.id === s.libraryId);
+    const source = !item ? null : item.demo ? demoProducer(item.id) : await library.getBlob(item.id);
+    if (!item || !source) {
+      toast(`Couldn't reload "${s.name}" onto deck ${id}. Load it again from the library.`, { kind: 'warn', ms: 6000 });
+      continue;
+    }
+    if (!untouched(id)) continue; // (the lookups above took a moment)
+    await loadIntoDeck(id, source, item);
+    const d = engine.decks[id];
+    if (d && d.loaded && d.track.libraryId === s.libraryId) {
+      if (s.range === 16) d.setPitchRange(16);
+      d.setPitch(s.pitch);
+      d.seek(s.position);
+    }
+  }
 }
 
 startBtn.addEventListener('click', async () => {
   showOverlay('busy');
   const res = await engine.start();
   if (!res.ok) {
-    showOverlay(res.unsupported ? 'unsupported' : started ? 'resume' : 'start', res.reason);
+    showOverlay(res.unsupported ? 'unsupported' : restore ? 'restart' : started ? 'resume' : 'start', res.reason);
     return;
   }
-  if (!started) {
+  if (!wired) {
+    wired = true;
     started = true;
-    for (const id of ['A', 'B']) {
-      const deck = engine.decks[id];
-      deckViews[id].attach(deck);
-      deck.addEventListener('error', (e) => toast(e.detail.message, { kind: 'error' }));
-      deck.addEventListener('grab', (e) => onGrabChange(deck, e));
-      deck.addEventListener('hotcues', (e) => {
-        if (e.detail.persist) persistHotCues(deck);
-      });
-      deck.addEventListener('loop', (e) => {
-        if (e.detail.reason === 'scratch') toast(`Loop on deck ${deck.id} ended: you let go outside it.`, { ms: 3000 });
-      });
-      deck.addEventListener('grid', (e) => {
-        updateSyncButtons();
-        if (e.detail.persist) persistGrid(deck, e.detail.grid);
-      });
+    wireEngine();
+    if (restore) {
+      const snap = restore;
+      restore = null;
+      restoreDecks(snap);
     }
-    applyMixer();
-    engine.addEventListener('blocked', () => {
-      releaseAllGrabs('blocked');
-      showOverlay('resume', 'Tap to bring the sound back.');
-    });
-    engine.addEventListener('running', () => {
-      overlay.hidden = true;
-    });
   }
   if (engine.state === 'running') overlay.hidden = true;
   else showOverlay('resume', 'Tap to bring the sound back.');
+});
+
+// ---- offline support and updates ----------------------------------------------------------
+
+const updateBar = $('update-bar');
+const updateReload = $('update-reload');
+const CONFIRM_WINDOW_MS = 4000;
+
+/**
+ * Show the update bar. While any deck is playing, a reload would cut the music, so the first tap only changes the
+ * bar to "Reload stops playback. Tap again"; a second tap within a few seconds reloads.
+ */
+function showUpdateBar(text, go) {
+  let armedUntil = 0;
+  let timer = null;
+  const reset = () => {
+    clearTimeout(timer);
+    armedUntil = 0;
+    updateReload.textContent = text;
+    updateReload.disabled = false;
+  };
+  reset();
+  updateBar.hidden = false;
+  updateReload.onclick = () => {
+    if (anyPlaying() && Date.now() > armedUntil) {
+      armedUntil = Date.now() + CONFIRM_WINDOW_MS;
+      updateReload.textContent = 'Reload stops playback. Tap again';
+      clearTimeout(timer);
+      timer = setTimeout(reset, CONFIRM_WINDOW_MS);
+      return;
+    }
+    updateReload.disabled = true;
+    go();
+  };
+  $('update-later').onclick = () => {
+    reset();
+    updateBar.hidden = true;
+  };
+}
+
+initPwa({
+  onUpdateReady: (apply) => showUpdateBar('Update ready: tap to reload', apply),
+  // another window already applied an update and this page is playing: finish it when the user says so
+  onStaleControl: (reload) => showUpdateBar('Reload to finish updating', reload),
+  isPlaying: anyPlaying,
 });
 
 showOverlay('start', 'Tap once to unlock audio on this device.');

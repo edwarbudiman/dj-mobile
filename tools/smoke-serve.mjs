@@ -51,6 +51,13 @@ try {
     ['/js/audio/bpm-core.js', 'text/javascript'],
     ['/js/ui/platter.js', 'text/javascript'],
     ['/css/app.css', 'text/css'],
+    ['/manifest.webmanifest', 'application/manifest+json'],
+    ['/sw.js', 'text/javascript'],
+    ['/icons/icon-192.png', 'image/png'],
+    ['/icons/icon-maskable-512.png', 'image/png'],
+    ['/icons/apple-touch-icon.png', 'image/png'],
+    ['/js/audio/demo-worker.js', 'text/javascript'],
+    ['/js/pwa.js', 'text/javascript'],
   ];
   for (const [p, type] of cases) {
     const r = await fetch(base + p);
@@ -58,6 +65,17 @@ try {
     check(r.status === 200, `${p} -> 200 (got ${r.status})`);
     check((r.headers.get('content-type') || '').startsWith(type), `${p} content-type ${r.headers.get('content-type')}`);
     check(r.headers.get('cache-control') === 'no-cache', `${p} Cache-Control no-cache`);
+  }
+  // The worker lives at the root, so its default scope already covers the app: no Service-Worker-Allowed header needed.
+  const swRes = await fetch(base + '/sw.js');
+  await swRes.arrayBuffer();
+  check(swRes.headers.get('service-worker-allowed') === null, 'sw.js needs no Service-Worker-Allowed header (served from the root)');
+  const manifest = await (await fetch(base + '/manifest.webmanifest')).json();
+  check(manifest.start_url === './' && manifest.scope === './' && manifest.id === './', 'manifest start_url, scope and id are "./"');
+  for (const icon of manifest.icons) {
+    const r = await fetch(`${base}/${icon.src}`);
+    const png = Buffer.from(await r.arrayBuffer());
+    check(r.status === 200 && png.subarray(1, 4).toString() === 'PNG', `manifest icon ${icon.src} is a PNG`);
   }
   check((await fetch(base + '/nope.js')).status === 404, 'missing file -> 404');
   for (const p of ['/../../etc/passwd', '/%2e%2e/%2e%2e/etc/passwd', '/js/../../etc/passwd', '/.cert/key.pem', '/.vscode/settings.json']) {

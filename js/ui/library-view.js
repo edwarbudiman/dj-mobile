@@ -26,7 +26,7 @@ export function createLibraryView(root, h) {
             <button type="button" class="btn" data-split="on" aria-pressed="false">On</button>
           </div></div>
         </div>
-        <p class="setting-note" data-role="split-note">Needs a Y-split headphone cable: left ear = cue, right ear = master.</p>
+        <p class="setting-note" data-role="split-note">Needs a stereo-to-dual-mono splitter (a "DJ splitter" cable): left channel to your headphones = cue, right channel to the speakers = master. A plain headphone Y splitter will not work.</p>
       </section>
       <p class="sheet-note" data-role="note" hidden></p>
       <ul class="track-list" data-role="list"></ul>

@@ -11,14 +11,17 @@
 //            cue bus gain -> mono -> (x 1-mix)/                                   |-> split gain --> destination
 //            master mono ---------------------> right bus -> limiter R ->|merger ch1|            /
 //
-// Split cue is for a Y-split headphone cable: left ear = cue/master mix, right ear = master, both mono
+// Split cue is for a stereo-to-dual-mono "DJ splitter" cable (left channel to the headphones, right channel to the
+// speakers; a plain headphone Y splitter will not work): left channel = cue/master mix, right ear = master, both mono
 // and both summed AFTER their own gain stages. Each ear has its own limiter, so a loud cue never ducks the
 // master ear and neither side can clip.
 //
 // Events (EventTarget): 'running' (context is producing audio), 'blocked' (context is
-// suspended/interrupted and needs a user gesture), 'statechange' {state}.
+// suspended/interrupted and needs a user gesture), 'statechange' {state}, 'closed' (the system closed the
+// context: this Engine is dead, build a new one).
 
 import { Deck } from './deck.js';
+import { enablePlaybackAudio } from './ios-audio.js';
 import { crossfaderGains, faderToGain, FADER_UNITY } from './mixer-math.js';
 
 const PROCESSOR_URL = new URL('./deck-processor.js', import.meta.url).href;
@@ -142,6 +145,8 @@ export class Engine extends EventTarget {
     // Kick off resume synchronously inside the gesture; iOS requires this before any await.
     const resumed = ctx.resume().catch(() => {});
     this._playUnlockTone(ctx);
+    // iOS: make the silent switch stop muting us (audioSession, or a silent looping <audio> on older iOS).
+    this._playback = enablePlaybackAudio();
 
     if (!ctx.audioWorklet) {
       return { ok: false, reason: 'AudioWorklet is unavailable on this page. Use https or localhost.', unsupported: true };
@@ -156,12 +161,20 @@ export class Engine extends EventTarget {
     this._applyCue(true);
 
     ctx.addEventListener('statechange', () => this._onStateChange());
-    document.addEventListener('visibilitychange', () => {
+    // Every listener is kept so _release() can remove it: a rebuilt engine must not leave dead ones behind.
+    const onVisible = () => {
       if (document.visibilityState === 'visible') this.ensureRunning();
-    });
+    };
+    // Back from the back/forward cache (iOS keeps a page frozen): the context may have been suspended meanwhile.
+    const onPageShow = () => this.ensureRunning();
+    const onGesture = () => this._gestureResume();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onPageShow);
+    this._unlisten = [() => document.removeEventListener('visibilitychange', onVisible), () => window.removeEventListener('pageshow', onPageShow)];
     // Any touch/key is a user gesture: use it to recover from suspended/interrupted.
     for (const type of ['pointerdown', 'touchend', 'keydown']) {
-      document.addEventListener(type, () => this._gestureResume(), { capture: true, passive: true });
+      document.addEventListener(type, onGesture, { capture: true, passive: true });
+      this._unlisten.push(() => document.removeEventListener(type, onGesture, { capture: true }));
     }
 
     await resumed;
@@ -210,12 +223,21 @@ export class Engine extends EventTarget {
     this.splitGain.gain.value = this.splitCue ? 1 : 0;
   }
 
+  /** Remove document listeners and stop the iOS silent loop. */
+  _release() {
+    for (const off of this._unlisten || []) off();
+    this._unlisten = [];
+    this._playback?.stop();
+    this._playback = null;
+  }
+
   _teardown() {
     const ctx = this.ctx;
     this.ctx = null;
     this.decks = {};
     this.master = this.limiter = null;
     this.cueBus = this.normalGain = this.splitGain = null;
+    this._release();
     if (ctx && ctx.state !== 'closed') ctx.close().catch(() => {});
   }
 
@@ -231,7 +253,13 @@ export class Engine extends EventTarget {
     }
   }
 
+  /** Tell the iOS silent-switch workaround whether any deck is playing (it only runs then). */
+  setPlaying(playing) {
+    this._playback?.setActive(playing);
+  }
+
   _gestureResume() {
+    this._playback?.refresh(); // restart the silent loop if an interruption paused it
     if (this.ctx && this.ctx.state !== 'running' && this.ctx.state !== 'closed') this.ctx.resume().catch(() => {});
   }
 
@@ -239,7 +267,13 @@ export class Engine extends EventTarget {
     const state = this.ctx.state;
     this.dispatchEvent(new CustomEvent('statechange', { detail: { state } }));
     if (state === 'running') this.dispatchEvent(new Event('running'));
-    else if (state !== 'closed') this.ensureRunning();
+    else if (state === 'closed') {
+      // The system closed the context (iOS can do this after a long interruption). Its decks and the samples
+      // inside them are gone; a closed context cannot be reopened, so the app builds a new engine on the next
+      // tap and reloads the tracks from the library (see main.js 'closed').
+      this._release();
+      this.dispatchEvent(new Event('closed'));
+    } else this.ensureRunning();
   }
 
   /** Try to resume; emits 'blocked' if the browser still refuses (needs a gesture). */
