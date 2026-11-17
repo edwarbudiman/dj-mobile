@@ -14,6 +14,8 @@ import { LOW_CONFIDENCE } from './audio/bpm-core.js';
 import { sanitizeHotCues } from './audio/cue-math.js';
 import { DEMOS, demoDuration } from './audio/demo-synth.js';
 import { buildDemo } from './audio/demo-loader.js';
+import { decideLoadFailure } from './audio/load-policy.js';
+import { readEstimate, shouldShowStorageNotice } from './store/persist.js';
 import { HEADER_BYTES, describeBeforeDecode, inspectAfterDecode, inspectBeforeDecode, parseAudioHeader, readMediaDuration } from './audio/memory-guard.js';
 import { createConfirm } from './ui/confirm.js';
 import { initPwa } from './pwa.js';
@@ -271,8 +273,18 @@ async function loadIntoDeck(deckId, source, item) {
   if (res.superseded || res.cancelled) return; // cancelled: the user said no to the memory warning; nothing changed
   if (!res.ok) {
     // (the deck already told the user about an out-of-memory failure; a paused deck's old track was freed first)
-    if (!res.oom) toast("Can't play this file (corrupt or unsupported format)", { kind: 'error', ms: 7000 });
+    const verdict = decideLoadFailure(res, item);
+    if (verdict.message) toast(verdict.message, { kind: 'error', ms: 7000 });
+    if (verdict.markFailed) {
+      item.lastError = true;
+      await library.update(item.id, { lastError: true });
+      refreshLibrary();
+    }
     return;
+  }
+  if (item.lastError) {
+    item.lastError = false;
+    library.update(item.id, { lastError: false }).then(() => refreshLibrary());
   }
   cancelAnalysis(deckId); // only now is the previous track's analysis obsolete
   deckViews[deckId].setPeaks(res.prepared.peaks);
@@ -441,6 +453,13 @@ const deckViews = {
 
 const libraryView = createLibraryView($('library'), {
   onAdd: (deck) => pickFiles(deck),
+  onDismissStorageNotice: () => {
+    try {
+      localStorage.setItem(STORAGE_NOTICE_KEY, '1');
+    } catch {
+      /* it may show again next time: fine */
+    }
+  },
   onSplitCue: (on) => {
     if (on && engine.ctx && !engine.splitSupported) {
       toast('This device has a mono audio output, so split cue is not available.', { kind: 'warn', ms: 5000 });
@@ -474,8 +493,24 @@ const libraryView = createLibraryView($('library'), {
 });
 
 async function refreshLibrary() {
-  libraryView.render([...demoItems(), ...(await library.list())], { persistent: library.persistent });
+  const items = await library.list();
+  const hasUser = items.length > 0;
+  libraryView.render([...demoItems(), ...items], {
+    persistent: library.persistent,
+    storageNotice: hasUser && shouldShowStorageNotice({ status: library.persistence, dismissed: storageNoticeDismissed() }),
+    usage: library.persistent && hasUser ? await readEstimate() : null,
+  });
 }
+
+const STORAGE_NOTICE_KEY = 'dj-mobile.storageNoticeSeen';
+function storageNoticeDismissed() {
+  try {
+    return localStorage.getItem(STORAGE_NOTICE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+library.onPersistence = () => refreshLibrary();
 showSplit(); // the saved split-cue choice (applied to the audio once the engine starts)
 
 function openLibrary(deck = null) {

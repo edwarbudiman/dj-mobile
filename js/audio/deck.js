@@ -396,7 +396,9 @@ export class Deck extends EventTarget {
       const message = oom
         ? 'Not enough memory to open this file. Try a shorter one (under about 15 minutes).'
         : (err && err.message) || 'unsupported or corrupt audio file';
-      this._emit('error', { message });
+      // Only an out-of-memory failure is announced here (its message replaces the app's). Any other load failure
+      // carries the browser's raw text, so the app tells the user in plain words from the returned result.
+      if (oom) this._emit('error', { message });
       return { ok: false, message, oom };
     } finally {
       if (isCurrent()) {

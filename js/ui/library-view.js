@@ -29,6 +29,11 @@ export function createLibraryView(root, h) {
         <p class="setting-note" data-role="split-note">Needs a stereo-to-dual-mono splitter (a "DJ splitter" cable): left channel to your headphones = cue, right channel to the speakers = master. A plain headphone Y splitter will not work.</p>
       </section>
       <p class="sheet-note" data-role="note" hidden></p>
+      <div class="storage-note" data-role="storage-note" hidden>
+        <p>Your browser may clear imported tracks if you don't open the app for a while. Adding it to your home screen makes that less likely.</p>
+        <button type="button" class="btn btn-sm" data-role="storage-ok">Got it</button>
+      </div>
+      <p class="storage-usage" data-role="usage" hidden></p>
       <ul class="track-list" data-role="list"></ul>
       <p class="sheet-empty" data-role="empty">No tracks yet. Choose Add files to pick audio from this device.</p>
     </div>`;
@@ -37,6 +42,12 @@ export function createLibraryView(root, h) {
   const empty = $('empty');
   const note = $('note');
   const heading = $('heading');
+  const storageNote = $('storage-note');
+  const usageEl = $('usage');
+  $('storage-ok').addEventListener('click', () => {
+    storageNote.hidden = true;
+    h.onDismissStorageNotice?.();
+  });
   let target = null; // deck this sheet was opened for
 
   const close = () => {
@@ -87,7 +98,9 @@ export function createLibraryView(root, h) {
     const bits = item.demo ? ['Built-in loop', formatDuration(item.duration)] : [formatDuration(item.duration), formatBytes(item.size)];
     if (item.bpm > 0) bits.push(`${item.bpm.toFixed(1)} BPM`);
     if (item.sessionOnly) bits.push('this session only');
+    if (item.lastError) bits.push("Couldn't play");
     meta.textContent = bits.join('  ');
+    meta.classList.toggle('failed', !!item.lastError);
     info.append(name, meta);
 
     const actions = document.createElement('div');
@@ -143,7 +156,10 @@ export function createLibraryView(root, h) {
       splitNote.textContent = supported ? SPLIT_NOTE : 'This device has a mono audio output, so split cue is not available.';
     },
     /** @param {object[]} items  @param {{persistent:boolean}} state */
-    render(items, { persistent }) {
+    render(items, { persistent, storageNotice = false, usage = null }) {
+      storageNote.hidden = !storageNotice;
+      usageEl.hidden = !usage;
+      usageEl.textContent = usage || '';
       list.replaceChildren(...items.map(row));
       empty.hidden = items.some((t) => !t.demo);
       note.hidden = persistent;

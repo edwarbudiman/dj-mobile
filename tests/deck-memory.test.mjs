@@ -118,9 +118,12 @@ test('an out-of-memory failure says so and suggests a shorter file; other failur
   assert.deepEqual(msgs, [r.message]);
 
   const bad = makeDeck((_b, _ok, fail) => fail(new Error('Unable to decode audio data')));
+  const badMsgs = [];
+  bad.addEventListener('error', (e) => badMsgs.push(e.detail.message));
   const r2 = await bad.loadBlob(blob, { name: 'junk' }, {});
   assert.equal(r2.oom, false);
   assert.match(r2.message, /decode/);
+  assert.deepEqual(badMsgs, [], 'a plain load failure is toasted by the app, not as a raw deck error');
 });
 
 test('afterDecode reports the decoded size so the app can warn once', async () => {

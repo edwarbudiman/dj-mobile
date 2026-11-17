@@ -26,7 +26,7 @@
 // changes, run that tool and paste its output over the VERSION line: tests/sw-precache.test.mjs fails until you
 // do, and it also fails if a file under js/, css/ or icons/ is missing from PRECACHE (or listed but absent).
 
-const VERSION = '9d52ae5ad8';
+const VERSION = '736b95d536';
 const CACHE_PREFIX = 'dj-mobile-';
 const CACHE = CACHE_PREFIX + VERSION;
 const NAVIGATION_TIMEOUT_MS = 4000;
@@ -54,6 +54,7 @@ const PRECACHE = [
   'js/audio/filter-math.js',
   'js/audio/ios-audio.js',
   'js/audio/loop-math.js',
+  'js/audio/load-policy.js',
   'js/audio/memory-guard.js',
   'js/audio/mixer-math.js',
   'js/audio/peaks.js',
@@ -63,6 +64,7 @@ const PRECACHE = [
   'js/main.js',
   'js/pwa.js',
   'js/store/db.js',
+  'js/store/persist.js',
   'js/ui/confirm.js',
   'js/ui/deck-view.js',
   'js/ui/fader.js',

@@ -104,8 +104,8 @@ README.md
 
 ## M5 — Final verification
 
-- [ ] 5.1 Orchestrator hostile self-review: edge cases, cross-system effects, missing fallbacks; findings fixed or documented
-- [ ] 5.2 End-to-end smoke in a real browser: load, play, waveform, scratch, mix
+- [x] 5.1 Orchestrator hostile self-review: edge cases, cross-system effects, missing fallbacks; findings fixed or documented
+- [x] 5.2 End-to-end smoke in a real browser: load, play, waveform, scratch, mix
 - [ ] 5.3 Final report: what was done, how to run on a phone
 
 ## M6 — GitHub Pages hosting (added by user mid-run)
@@ -114,8 +114,8 @@ README.md
 - [x] 6.2 Public repo `edwarbudiman/dj-mobile` created and pushed with the existing gh login
 - [x] 6.3 Pages enabled from `main` branch root; empty `.nojekyll` present
 - [x] 6.4 Every asset, worklet, worker, manifest and service-worker path is relative; manifest `start_url` and `scope` are `./`; app works under `/dj-mobile/`
-- [ ] 6.5 Commit and push after each milestone passes review (pushed: M1+M2, M3, M4 · pending: M5)
-- [ ] 6.6 Live check: https://edwarbudiman.github.io/dj-mobile/ returns 200, worklet and service worker load there
+- [x] 6.5 Commit and push after each milestone passes review (pushed: M1+M2, M3, M4, M5)
+- [x] 6.6 Live check: https://edwarbudiman.github.io/dj-mobile/ returns 200, worklet and service worker load there
 - Rule: never push secrets or audio files. Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ## Review log
@@ -142,3 +142,11 @@ README.md
 - M4B round 1 (reviewer-m4): FAIL. MAJOR B-1: long MP3/AAC mixes under 60 MB load with no memory warning (45-min 128 kbps → ~2 GB peak). MINOR b-2 second window runs mixed versions after update, b-3 every in-scope navigation gets index.html, b-4 failed load empties paused deck, b-5 iOS silent loop runs forever / not restarted after interruption, b-6 restore can overwrite a user load, b-7 "Y-split" wording wrong (needs a stereo-to-dual-mono DJ splitter), b-8 estimate ignores resampling, b-9 update reload cuts playing music. Report: tests/_review/m4b-report.md. Back to builder-m4.
 - M4B build 2: all 9 items fixed, 211 tests, VERSION f9bff1610e. Orchestrator browser check of the update flow: new SW installed beside the old cache and waited, "Update ready: tap to reload" shown, tap → one reload, only dj-mobile-f9bff1610e cache remains, page controlled, bar gone. Awaiting reviewer-m4 round 2.
 - M4B round 2 (reviewer-m4): PASS. c-1 hardening (stored duration, 1.5 s metadata timeout, size-guess threshold 25 min) applied by builder-m4, 213 tests, SW VERSION 9d52ae5ad8. M4 closed, committed, pushed; builder-m4/reviewer-m4 tabs closed.
+- 6.6 live check (orchestrator, Chrome): https://edwarbudiman.github.io/dj-mobile/ → 200; sw.js, manifest (application/manifest+json), worklet, workers, icons all 200; SW active at scope /dj-mobile/, controls the page, cache dj-mobile-9d52ae5ad8 with 46 files; audio unlocked (worklet loaded) and the 128 BPM demo built in the Worker and loaded on deck B.
+- 5.2 E2E (orchestrator, desktop Chrome, LIVE site https://edwarbudiman.github.io/dj-mobile/): unlock → load both demos → Play both (time advances 2.0 s per 2 s, real audio clock) → SYNC B to A (−4.69 % → 122.0 BPM) → crossfader drag → real mouse-drag scratch on platter A (rewound ~0.4 s, spun back up, kept playing, no stuck grab) → no app console errors. Real-phone touch/iOS audio not testable here.
+- 5.1 hostile self-review findings (orchestrator): H-1 no navigator.storage.persist() → library can be silently evicted (Safari ~7-day ITP, Chrome storage pressure); H-2 accept="audio/*" hides .flac/.opus/.m4a on some Android pickers; H-3 an undecodable just-added file stays in the library as a dead entry; H-4 README gaps (memory-guard wording outdated, no note that iOS stops audio on lock/background, pitch fader direction, loading both decks at once doubles peak memory, storage eviction). Sent to a fresh M5 pair.
+- M5 pair: builder-m5 (w21:tB, pane w21:pB), reviewer-m5 (w21:tC, pane w21:pC). Close both after the hostile-review fixes are pushed. Note: tab w21:tA ("4") was not created by the orchestrator — never touch it.
+- M5 build 1 (builder-m5): H-1..H-4 implemented, 219 tests, VERSION c9b59f4b6d. Orchestrator browser check: accept list extended, storage line "10 MB of 10.0 GB used" shown; GAP found (O-1): persist() is requested only on a new add (db.js:80-91), so a user whose tracks were stored before this change is never protected and persisted() stays false. Awaiting reviewer-m5; O-1 to be bundled with its findings.
+- M5 round 1 (reviewer-m5): FAIL. MAJOR-1: the H-3 auto-removal (orchestrator's own request) can delete good tracks (OOM reported as EncodingError, null old-Safari error, transient NotReadableError, closed context, post-decode failures). Decision: never auto-delete; mark the track "couldn't play" instead. MINOR-1 = O-1: request persistence on init when stored tracks exist. Report: tests/_review/m5-report.md. Back to builder-m5.
+- M5 build 2: never auto-delete (mark "Couldn't play"), persistence requested on init for existing libraries; 220 tests, VERSION 185cd54de3. Orchestrator browser check: broken file kept and marked "Couldn't play", eviction notice shown after reload with an existing library. Small UX nit queued: one failure shows two toasts (raw browser "Unable to decode audio data" + app message). Test file removed via Delete. Awaiting reviewer-m5 round 2.
+- M5 round 2 (reviewer-m5): PASS. Duplicate error toast fixed by builder-m5 and verified by the orchestrator in Chrome (one plain-language toast). VERSION 736b95d536, 220 tests. 5.1 closed, committed, pushed; builder-m5/reviewer-m5 tabs closed.

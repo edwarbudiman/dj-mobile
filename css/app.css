@@ -416,6 +416,10 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
 .setting-note[data-warn="true"] { color: var(--cue); }
 .demo-tag { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 4px; background: var(--text); color: var(--ink); font-size: 11px; font-weight: 800; vertical-align: 1px; }
 .sheet-note { margin: 0; padding: 6px 12px; color: var(--cue); font-size: 13px; }
+.storage-note { display: flex; align-items: center; gap: 12px; margin: 0 12px 6px; padding: 8px 10px; border-left: 3px solid var(--cue); background: var(--plate-hi); border-radius: 6px; }
+.storage-note p { flex: 1; margin: 0; font-size: 13px; line-height: 1.35; }
+.track-meta.failed { color: var(--cue); }
+.storage-usage { margin: 0; padding: 2px 12px 6px; color: var(--dim); font-size: 12px; }
 .sheet-empty { margin: 0; padding: 24px 16px; color: var(--dim); text-align: center; font-size: 15px; }
 .track-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y; overscroll-behavior: contain; }
 .track { display: flex; align-items: center; gap: 8px; padding: 6px 12px; }

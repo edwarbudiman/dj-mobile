@@ -6,6 +6,8 @@
 // Metadata record: { id, name, size, type, duration|null, bpm|null, beatOffset|null,
 //                    bpmConfidence|null, bpmSource|null, addedAt }
 
+import { requestPersistence } from './persist.js';
+
 const DB_NAME = 'dj-mobile';
 const DB_VERSION = 1;
 const META = 'tracks';
@@ -40,6 +42,9 @@ export class Library {
     this.db = null;
     this.memory = new Map(); // id -> { meta, blob }: session-only items
     this._warnedMemory = false;
+    this._persistAsked = false;
+    this.persistence = null; // 'granted' | 'denied' | 'unavailable' once asked
+    this.onPersistence = null;
   }
 
   /** True when new tracks are being persisted. */
@@ -65,10 +70,34 @@ export class Library {
         this.db = null;
       };
       this.db = db;
+      this._protectExisting();
     } catch {
       this.db = null;
       this._warnMemory('Storage is unavailable here, so your library will only last for this session.');
     }
+  }
+
+  /** An existing library (from an earlier visit) gets the same protection and notice. Never throws or blocks. */
+  async _protectExisting() {
+    try {
+      if ((await this.list()).some((t) => !t.sessionOnly)) this._askPersistence();
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /** After the first stored user track: ask the browser to keep our storage. Fire and forget; never throws. */
+  _askPersistence() {
+    if (this._persistAsked) return;
+    this._persistAsked = true;
+    requestPersistence().then((status) => {
+      this.persistence = status;
+      try {
+        this.onPersistence?.(status);
+      } catch {
+        /* a UI hook must not break storage */
+      }
+    });
   }
 
   _warnMemory(message) {
@@ -120,6 +149,7 @@ export class Library {
         tx.objectStore(META).put(meta);
         tx.objectStore(BLOBS).put(blob, meta.id);
         await txDone(tx);
+        this._askPersistence();
         return meta;
       } catch (err) {
         this.notify(

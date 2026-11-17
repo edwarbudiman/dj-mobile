@@ -83,13 +83,22 @@ Tapping always wins and is saved.
 
 - **No key lock.** Changing the pitch changes the speed and the key together, like a turntable.
 - **Memory.** A decoded track takes frames × channels × 4 bytes: 10 minutes of stereo is about 200–230 MB, and loading
-  briefly needs about double. Two such tracks are near what a phone can do. The app asks before decoding a file over
-  60 MB or a WAV/AIFF over 15 minutes, and tells you if the device runs out. Shorter tracks are safer.
+  briefly needs about double. Two such tracks are near what a phone can do. The app asks before decoding any file
+  whose length is over 15 minutes (read from the header, from the browser's metadata, or estimated from the file
+  size), whose decoded size would be very large, or that is over 60 MB. It also tells you if the device runs out.
+  Shorter tracks are safer. Loading both decks at the same time with long tracks doubles the peak memory, so load
+  big tracks one at a time.
+- **Pitch fader.** It works like a turntable: down = faster, up = slower.
+- **iPhone sound stops in the background.** The sound stops when the screen locks or you switch apps (iOS suspends
+  web audio in the background). Keep the screen on: the app holds a wake lock while playing.
 - **iPhone quirks.** Audio starts only after a tap. A phone call or Siri pauses it; tap to bring the sound back. If
   iOS resets the audio engine, tap to restart and the tracks reload from your library. The silent switch is handled
   (the app asks iOS for the "playback" audio category).
 - **Storage.** Tracks live in your browser's storage. Clearing site data deletes them. In private browsing the library
-  lasts only for the session.
+  lasts only for the session. The app asks the browser to keep its storage, but browsers can still clear it: Safari
+  may remove it after about 7 days without use, and Chrome may when the device is short on space. Installing the app
+  to the home screen makes this less likely. The library shows a notice if the browser did not grant it. A file that
+  fails to load stays in the library, marked "Couldn't play". The app never deletes a track by itself: use Delete.
 - **No recording or export**, and no streaming from music services.
 - **Browsers:** a recent Safari (iOS/iPadOS/macOS 15 or newer), Chrome or Edge, or Firefox. It needs AudioWorklet and
   a secure page.
