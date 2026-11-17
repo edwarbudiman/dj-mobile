@@ -106,7 +106,7 @@ README.md
 
 - [x] 5.1 Orchestrator hostile self-review: edge cases, cross-system effects, missing fallbacks; findings fixed or documented
 - [x] 5.2 End-to-end smoke in a real browser: load, play, waveform, scratch, mix
-- [ ] 5.3 Final report: what was done, how to run on a phone
+- [x] 5.3 Final report: what was done, how to run on a phone
 
 ## M6 — GitHub Pages hosting (added by user mid-run)
 
@@ -150,3 +150,4 @@ README.md
 - M5 round 1 (reviewer-m5): FAIL. MAJOR-1: the H-3 auto-removal (orchestrator's own request) can delete good tracks (OOM reported as EncodingError, null old-Safari error, transient NotReadableError, closed context, post-decode failures). Decision: never auto-delete; mark the track "couldn't play" instead. MINOR-1 = O-1: request persistence on init when stored tracks exist. Report: tests/_review/m5-report.md. Back to builder-m5.
 - M5 build 2: never auto-delete (mark "Couldn't play"), persistence requested on init for existing libraries; 220 tests, VERSION 185cd54de3. Orchestrator browser check: broken file kept and marked "Couldn't play", eviction notice shown after reload with an existing library. Small UX nit queued: one failure shows two toasts (raw browser "Unable to decode audio data" + app message). Test file removed via Delete. Awaiting reviewer-m5 round 2.
 - M5 round 2 (reviewer-m5): PASS. Duplicate error toast fixed by builder-m5 and verified by the orchestrator in Chrome (one plain-language toast). VERSION 736b95d536, 220 tests. 5.1 closed, committed, pushed; builder-m5/reviewer-m5 tabs closed.
+- Final live check (orchestrator, Chrome): live site updated from 9d52ae5ad8 to 736b95d536 through the "Update ready" bar (one reload, only the new cache left), audio unlocked, demo loaded at 122.0 BPM and played in real time. Local server stopped, orchestrator browser tab closed. 5.3 final report delivered in chat. All checklist items closed.
