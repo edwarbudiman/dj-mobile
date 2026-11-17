@@ -160,7 +160,14 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
   cursor: pointer;
 }
 .wave-empty:active { color: var(--text); }
-.wave-overview { touch-action: none; cursor: pointer; }
+.wave-overview { touch-action: none; cursor: pointer; transition: opacity .12s; }
+/* The zoom view is a scratch surface: drag it sideways and the waveform sticks to the finger. */
+.wave-zoom { touch-action: none; cursor: grab; }
+.wave-zoom.has-track.grabbing { cursor: grabbing; }
+.deck.grabbed .wave-zoom::after {
+  content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
 /* The strip is 28 px tall. Its hit area extends only DOWNWARD, 6 px into the empty gap above the
    lower controls, never up over the zoom waveform (which becomes a scratch surface in M3). */
 .wave-overview.has-track::after { content: ""; position: absolute; left: 0; right: 0; top: 0; bottom: -6px; z-index: 2; }
@@ -181,7 +188,12 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
   width: 100%; height: auto; aspect-ratio: 1; max-height: 100%; /* fallback without container units */
   width: min(100cqw, 100cqh); height: min(100cqw, 100cqh);
   display: block; touch-action: none;
+  border-radius: 50%; cursor: grab;
 }
+/* A hand on the record: ring and marker turn the deck colour (redrawn in the canvas) and the zoom view
+   gets an outline. Hand wins: seeks and cue are ignored meanwhile, so they are dimmed. */
+.deck.grabbed .platter-slot canvas { cursor: grabbing; }
+.deck.grabbed .wave-overview, .deck.grabbed .btn-cue { opacity: .4; }
 .transport { grid-column: 2; grid-row: 2; display: flex; gap: 4px; min-width: 0; }
 .tools { grid-column: 3; grid-row: 1 / 3; display: flex; flex-direction: column; gap: 4px; justify-content: flex-start; }
 /* mirror for deck B: pitch strip on the right edge, transport at the right corner */
@@ -423,6 +435,9 @@ button { font: inherit; color: inherit; letter-spacing: inherit; }
     touch-action: pan-y;
     align-content: start;
   }
+  /* The stack scrolls: a vertical swipe over the zoom waveform or platter scrolls it. scratch.js arms a
+     touch there and only grabs after a short hold or a horizontal / circular first movement. */
+  .wave-zoom, .platter-slot canvas { touch-action: pan-y; }
   .deck { min-height: 460px; }
   .mixer { grid-template-rows: 0 minmax(170px, 1fr) var(--tap); min-height: 260px; justify-self: center; }
 }

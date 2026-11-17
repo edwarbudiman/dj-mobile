@@ -200,10 +200,56 @@ export class Overview extends Surface {
   }
 }
 
+export const GRAB_ZOOM_SECONDS = 2; // while a finger holds the record the view zooms in: a drag is ~4x finer
+const ZOOM_EASE_TAU_MS = 35; // ~95 % of the way in 100 ms
+
+// Frames per column (a whole number of level-0 buckets) for a view `w` px wide showing `seconds`.
+function zoomFramesPerPixel(sampleRate, w, seconds) {
+  return Math.max(1, Math.round(((seconds * sampleRate) / w) / PEAK_BASE)) * PEAK_BASE;
+}
+
 export class ZoomWave extends Surface {
-  /** @param {{pos:number, duration:number, cue:number, grid:{bpm:number,offset:number}|null}} s */
-  draw({ pos, duration, cue, grid }) {
+  constructor(canvas) {
+    super(canvas);
+    this.zoomSeconds = ZOOM_SECONDS; // currently shown width, eased toward zoomTarget
+    this.zoomTarget = ZOOM_SECONDS;
+    this._zoomAt = 0;
+  }
+
+  /** Zoom in while a finger holds the record, back out on release (eased either way). */
+  setGrabbed(on) {
+    const t = on ? GRAB_ZOOM_SECONDS : ZOOM_SECONDS;
+    if (t !== this.zoomTarget) {
+      this.zoomTarget = t;
+      this._zoomAt = performance.now();
+    }
+  }
+
+  /** True while the zoom level is still easing: the caller keeps redrawing. */
+  get animating() {
+    return this.zoomSeconds !== this.zoomTarget;
+  }
+
+  _ease() {
+    if (this.zoomSeconds === this.zoomTarget) return;
+    const now = performance.now();
+    const dt = Math.max(0, now - this._zoomAt);
+    this._zoomAt = now;
+    this.zoomSeconds += (this.zoomTarget - this.zoomSeconds) * (1 - Math.exp(-dt / ZOOM_EASE_TAU_MS));
+    if (Math.abs(this.zoomTarget - this.zoomSeconds) < 0.01) this.zoomSeconds = this.zoomTarget;
+  }
+
+  /** Track seconds per CSS pixel of the zoom view as currently drawn (what a scratch drag maps pixels to), or null before layout. */
+  get secondsPerPixel() {
+    if (!(this.w > 0)) return null;
+    const sr = this.peaks ? this.peaks.sampleRate : 0;
+    return sr > 0 ? zoomFramesPerPixel(sr, this.w, this.zoomSeconds) / sr : this.zoomSeconds / this.w;
+  }
+
+  /** @param {{pos:number, duration:number, cue:number, grid:{bpm:number,offset:number}|null, grabbed?:boolean}} s */
+  draw({ pos, duration, cue, grid, grabbed = false }) {
     if (!this.fit()) return;
+    this._ease();
     const { ctx, w, h } = this;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -214,7 +260,7 @@ export class ZoomWave extends Surface {
     // multiples of framesPerPixel in the track, and the leftover fraction becomes a sub-pixel
     // translation, so bar heights never change as the track scrolls (no shimmer).
     const sr = peaks.sampleRate;
-    const fpp = Math.max(1, Math.round(((ZOOM_SECONDS * sr) / w) / PEAK_BASE)) * PEAK_BASE;
+    const fpp = zoomFramesPerPixel(sr, w, this.zoomSeconds);
     const secPerPx = fpp / sr;
     const centre = w / 2;
     const leftFrame = (pos - (centre * secPerPx)) * sr;
@@ -254,8 +300,16 @@ export class ZoomWave extends Surface {
       ctx.lineTo(cx + 1, 8);
       ctx.fill();
     }
-    ctx.fillStyle = '#ece8df';
-    ctx.fillRect(Math.round(centre) - 1, 0, 2, h);
+    // Playhead: pale normally; while the record is in a hand it sits in a dark slot and takes the deck colour.
+    if (grabbed) {
+      ctx.fillStyle = this.colors.well;
+      ctx.fillRect(Math.round(centre) - 4, 0, 8, h);
+      ctx.fillStyle = this.colors.accent;
+      ctx.fillRect(Math.round(centre) - 1, 0, 3, h);
+    } else {
+      ctx.fillStyle = '#ece8df';
+      ctx.fillRect(Math.round(centre) - 1, 0, 2, h);
+    }
   }
 
   // Draw columns [from, to) of the current min/max arrays.

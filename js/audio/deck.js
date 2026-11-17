@@ -3,10 +3,15 @@
 // model (beat grid, pitch, pitch bend).
 //
 // Events (EventTarget): 'loading' {loading}, 'track' {track|null}, 'playstate' {playing},
-// 'cue' {cue}, 'grid' {grid|null, persist}, 'pitch' {pitch, range}, 'ended', 'error' {message}.
+// 'cue' {cue}, 'grid' {grid|null, persist}, 'pitch' {pitch, range}, 'ended', 'error' {message},
+// 'grab' {grabbed, reason}.
+//
+// Scratch precedence: while `grabbed` the hand wins. seek() and cuePress() are ignored, play/pause only
+// toggle the state (the audio keeps following the hand until release), and rebasing is skipped.
 
 import { clamp, eqPositionToDb, faderToGain } from './mixer-math.js';
 import { estimatePosition, isNear } from './playhead-math.js';
+import { applyDelta } from './scratch-math.js';
 import { effectiveBpm, pitchToRate } from './sync-math.js';
 
 const EQ_BANDS = {
@@ -17,6 +22,8 @@ const EQ_BANDS = {
 const SMOOTH = 0.012; // setTargetAtTime constant for control changes
 export const BEND_AMOUNT = 0.04; // pitch-bend buttons change the rate by 4 %
 const OFFSET_DECAY = 0.12; // seconds for the heard-position continuity offset to fade out
+const RELEASE_GAP = 0.008; // a scratch release only slides the display when it is more than this far (s) from the heard position
+const RELEASE_EASE = 0.07; // ...over about this long (time constant, s)
 
 function decode(ctx, arrayBuffer) {
   // Callback form: works on every Safari, unlike promise-only decodeAudioData.
@@ -43,6 +50,8 @@ export class Deck extends EventTarget {
     this._loadToken = 0;
     this._latency = { at: -1, value: 0 };
     this._off = { v: 0, t: 0 };
+    this.grabbed = false; // a finger is holding the record (platter or zoom waveform)
+    this._shown = 0; // position the display follows while grabbed: the finger's, with no latency
 
     this.node = new AudioWorkletNode(ctx, 'deck-processor', {
       numberOfInputs: 0,
@@ -101,7 +110,12 @@ export class Deck extends EventTarget {
 
   /** True while the playhead is (or may be) moving: drives the shared redraw loop. */
   get moving() {
-    return this.playing || (this._report !== null && this._report.speed !== 0);
+    return this.playing || this.grabbed || (this._report !== null && this._report.speed !== 0);
+  }
+
+  /** Position to draw: the finger's while grabbed (the marker stays under it), the heard position otherwise. */
+  get displayPosition() {
+    return this.grabbed ? this._shown : this.heardPosition;
   }
 
   /** Engine position in seconds, interpolated between worklet reports. */
@@ -141,7 +155,7 @@ export class Deck extends EventTarget {
    */
   get heardPosition() {
     const now = this.ctx.currentTime;
-    const off = this._off.v * Math.exp(-(now - this._off.t) / OFFSET_DECAY);
+    const off = this._off.v * Math.exp(-(now - this._off.t) / (this._off.tau || OFFSET_DECAY));
     return clamp(this._heardBase() + off, 0, this.duration);
   }
 
@@ -221,6 +235,7 @@ export class Deck extends EventTarget {
       if (!isCurrent() || (hooks.beforeTransfer && prepared === null)) return { ok: false, superseded: true };
 
       const track = { name: meta.name, libraryId: meta.libraryId ?? null, duration, sampleRate, length };
+      this.scratchEnd('load', false); // the worklet drops its own scratch state when it swaps buffers
       this._post({ type: 'load', left, right, sampleRate }, right ? [left.buffer, right.buffer] : [left.buffer]);
       this.track = track;
       this.playing = false;
@@ -254,7 +269,7 @@ export class Deck extends EventTarget {
   play() {
     if (!this.track || this.playing) return;
     this.playing = true;
-    this._rebase(this.rate);
+    if (!this.grabbed) this._rebase(this.rate);
     this._post({ type: 'play' });
     this._emit('playstate', { playing: true });
   }
@@ -263,7 +278,7 @@ export class Deck extends EventTarget {
     if (!this.track || !this.playing) return;
     this.playing = false;
     this.previewing = false;
-    this._rebase(0);
+    if (!this.grabbed) this._rebase(0);
     this._post({ type: 'pause' });
     this._emit('playstate', { playing: false });
   }
@@ -279,24 +294,64 @@ export class Deck extends EventTarget {
   }
 
   seek(seconds) {
-    if (!this.track || !Number.isFinite(seconds)) return;
+    if (!this.track || this.grabbed || !Number.isFinite(seconds)) return; // the hand wins
     const t = clamp(seconds, 0, this.duration);
     this._report = { pos: t, ctxTime: this.ctx.currentTime, speed: this.playing ? this.rate : 0 };
     this._off = { v: 0, t: this.ctx.currentTime }; // a seek is meant to jump
     this._post({ type: 'seek', time: t });
   }
 
-  /** Scratch hook for M3: chase `seconds`, or release with null. */
-  setScratchTarget(seconds) {
-    if (seconds !== null && !Number.isFinite(seconds)) return;
-    this._post({ type: 'scratch', target: seconds });
+  // ---- scratch --------------------------------------------------------------------------
+
+  /** A finger lands on the record: it stops under the finger. Returns false when there is nothing to grab. */
+  scratchBegin() {
+    if (!this.track || this.grabbed) return false;
+    this.grabbed = true;
+    // Grab at the position the listener hears (the engine runs ahead by the output latency), so the
+    // display, the finger and the audio agree from the first touch.
+    this._shown = this.heardPosition;
+    this._post({ type: 'scratch', delta: 0, at: this._shown, t: performance.now() / 1000 });
+    this._emit('grab', { grabbed: true, reason: 'grab' });
+    return true;
+  }
+
+  /**
+   * The finger moved the record by `seconds` of track time (forward positive).
+   * @param {number} seconds
+   * @param {number} [timeStamp] the pointer event's timeStamp (performance.now() domain)
+   */
+  scratchBy(seconds, timeStamp) {
+    if (!this.grabbed || !Number.isFinite(seconds) || seconds === 0) return;
+    this._shown = applyDelta(this._shown, seconds, 0, this.duration);
+    // Pointer event time in seconds on the performance clock; the worklet only uses differences between events.
+    const t = (Number.isFinite(timeStamp) && timeStamp > 0 ? timeStamp : performance.now()) / 1000;
+    this._post({ type: 'scratch', delta: seconds, t });
+  }
+
+  /**
+   * The finger lifted (or the grab was lost). Playing: the motor spins the record back up to the pitch
+   * rate; paused: it stays where the finger left it. Safe to call when not grabbed.
+   */
+  scratchEnd(reason = 'release', post = true) {
+    if (!this.grabbed) return;
+    const shown = this._shown;
+    this.grabbed = false;
+    if (post) {
+      this._post({ type: 'scratch', target: null });
+      // The display followed the finger; it now returns to the heard position. After a fast flick those
+      // differ by (scratch lag + output latency) x speed, which would jump the waveform: ease it out over
+      // ~70 ms. A normal release (finger at rest) has no gap and gets no slide.
+      const gap = shown - this._heardBase();
+      if (Math.abs(gap) > RELEASE_GAP && Number.isFinite(gap)) this._off = { v: gap, t: this.ctx.currentTime, tau: RELEASE_EASE };
+    }
+    this._emit('grab', { grabbed: false, reason });
   }
 
   // ---- pitch / tempo ----------------------------------------------------------------------
 
   _applyRate() {
     this._post({ type: 'rate', value: this.rate });
-    if (this.playing) this._rebase(this.rate);
+    if (this.playing && !this.grabbed) this._rebase(this.rate);
   }
 
   /** Pitch in percent (+8 = 8 % faster), limited to the current range. */
@@ -341,7 +396,7 @@ export class Deck extends EventTarget {
    *  - paused elsewhere: set the cue point here.
    */
   cuePress() {
-    if (!this.track) return;
+    if (!this.track || this.grabbed) return; // the hand wins
     if (this.playing) {
       this.pause();
       this.seek(this.cue);

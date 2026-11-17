@@ -13,6 +13,7 @@ import { beatPosition, faderToPitch, pitchToFader, retempo, shiftGrid, tapTempo 
 import { createFader } from './fader.js';
 import { formatRemaining, formatTime } from './format.js';
 import { Platter } from './platter.js';
+import { createScratch } from './scratch.js';
 import { Overview, ZoomWave } from './waveform.js';
 
 const TEMPLATE = `
@@ -130,6 +131,13 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
   });
   const zoom = new ZoomWave($('zoom'));
   const platter = new Platter($('platter'), { letter: id });
+  // Finger on the platter or the zoom waveform grabs the record; the overview strip keeps seeking.
+  const scratch = createScratch({
+    getDeck: () => deck,
+    platterEl: platter.element,
+    waveEl: zoomSlot,
+    secondsPerPixel: () => zoom.secondsPerPixel,
+  });
 
   loadBtn.addEventListener('click', onLoadClick);
 
@@ -200,7 +208,6 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
   pitchFader.el.setAttribute('title', 'Pitch. Drag; slide your finger sideways for fine control. Double-tap to reset.');
   $('pitch-slot').appendChild(pitchFader.el);
 
-  // Readout steppers: top half of the readout = -0.02 %, bottom half = +0.02 % (auto-repeat while held).
   {
     // The readout is a 44 x 44 px display that is also a vertical jog: swipe up or down on it and it
     // steps by 0.02 % per 10 px (up = slower, like the fader). There are no halves to hit, so a tap
@@ -401,6 +408,11 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
         renderBpm();
         redraw = true;
       });
+      d.addEventListener('grab', (e) => {
+        root.classList.toggle('grabbed', e.detail.grabbed);
+        if (!e.detail.grabbed) scratch.forget(); // e.g. a new track replaced the one in hand
+        redraw = true;
+      });
       d.addEventListener('playstate', syncPlay);
       d.addEventListener('cue', () => {
         redraw = true;
@@ -431,6 +443,10 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
       renderBpm();
       syncEnabled();
     },
+    /** Let go of the record (window blur, hidden tab, audio blocked). */
+    releaseGrab(reason) {
+      scratch.release(reason);
+    },
     setSyncAvailable(ok) {
       syncBtn.setAttribute('aria-disabled', String(!ok));
     },
@@ -440,7 +456,8 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
         platter.draw(0, false); // the disc is visible before a track is loaded
         return;
       }
-      const pos = deck.heardPosition;
+      const grabbed = deck.grabbed;
+      const pos = deck.displayPosition; // the finger's position while grabbed, so the marker never trails it
       const left = deck.duration - pos;
       const e = formatTime(pos);
       const r = formatRemaining(left);
@@ -467,15 +484,16 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
         dots.forEach((d) => d.classList.remove('on'));
       }
 
-      const dirty = overview.takeDirty() | zoom.takeDirty() | redraw;
+      zoom.setGrabbed(grabbed);
+      const dirty = overview.takeDirty() | zoom.takeDirty() | zoom.animating | redraw;
       if (dirty || deck.moving || pos !== shown.pos) {
         shown.pos = pos;
         redraw = false;
-        const state = { pos, duration: deck.duration, cue: deck.cue, grid };
+        const state = { pos, duration: deck.duration, cue: deck.cue, grid, grabbed };
         overview.draw(state);
         zoom.draw(state);
       }
-      platter.draw(pos, deck.playing);
+      platter.draw(pos, deck.playing, grabbed);
     },
   };
 }

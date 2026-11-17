@@ -1,9 +1,9 @@
 // Platter: a vinyl disc that turns with the playhead at 33 1/3 rpm of TRACK time (so pitch changes
 // and reverse play are reflected). Static artwork is cached once per size; each frame only draws the
-// lit ring and the position marker. M3 will attach scratch pointer handling to `element`
-// (see angleAt() for the geometry helper); nothing grabs the record yet.
+// lit ring and the position marker. Scratch pointer handling (js/ui/scratch.js) attaches to `element`.
+// While a finger holds the record the ring and marker take the deck colour, thicker (`grabbed`).
 
-const REV_PER_SECOND = 100 / 3 / 60; // 33 1/3 rpm
+import { DEAD_ZONE, positionToAngle } from '../audio/scratch-math.js';
 
 export class Platter {
   /** @param {HTMLCanvasElement} canvas  @param {{letter:string}} o */
@@ -16,7 +16,7 @@ export class Platter {
     this.dpr = 1;
     this.needsFit = true;
     this.accent = '#38d4ff';
-    this.drawn = { angle: NaN, playing: null };
+    this.drawn = { angle: NaN, playing: null, grabbed: null };
     if (typeof ResizeObserver === 'function') {
       this.ro = new ResizeObserver(() => {
         this.needsFit = true;
@@ -58,7 +58,7 @@ export class Platter {
     this.canvas.height = Math.round(r.height * dpr);
     this.accent = getComputedStyle(this.canvas).getPropertyValue('--accent').trim() || this.accent;
     this._buildCache(r.width, r.height);
-    this.drawn = { angle: NaN, playing: null };
+    this.drawn = { angle: NaN, playing: null, grabbed: null };
   }
 
   _buildCache(w, h) {
@@ -90,13 +90,13 @@ export class Platter {
     // label
     g.fillStyle = '#25262a';
     g.beginPath();
-    g.arc(0, 0, R * 0.36, 0, Math.PI * 2);
+    g.arc(0, 0, R * DEAD_ZONE, 0, Math.PI * 2); // the label is the scratch dead zone
     g.fill();
     g.strokeStyle = this.accent;
     g.globalAlpha = 0.5;
     g.lineWidth = Math.max(1.5, R * 0.03);
     g.beginPath();
-    g.arc(0, 0, R * 0.36, 0, Math.PI * 2);
+    g.arc(0, 0, R * DEAD_ZONE, 0, Math.PI * 2);
     g.stroke();
     g.globalAlpha = 1;
     g.fillStyle = '#ece8df';
@@ -132,14 +132,16 @@ export class Platter {
   /**
    * @param {number} pos      track position in seconds
    * @param {boolean} playing lights the ring while the deck plays
+   * @param {boolean} [grabbed] a finger holds the record: ring and marker in the deck colour, heavier
    * @returns {boolean} true if anything was drawn
    */
-  draw(pos, playing) {
+  draw(pos, playing, grabbed = false) {
     if (this.needsFit) this._fit();
     if (!(this.size > 0) || !this.cache) return false;
-    const angle = (((pos * REV_PER_SECOND) % 1) + 1) % 1 * Math.PI * 2;
-    if (Math.abs(angle - this.drawn.angle) < 0.004 && playing === this.drawn.playing) return false;
-    this.drawn = { angle, playing };
+    const angle = positionToAngle(pos);
+    if (Math.abs(angle - this.drawn.angle) < 0.004 && playing === this.drawn.playing && grabbed === this.drawn.grabbed) return false;
+    this.drawn = { angle, playing, grabbed };
+    const lit = playing || grabbed;
 
     const { ctx, dpr } = this;
     const w = this.canvas.width / dpr;
@@ -151,20 +153,20 @@ export class Platter {
     ctx.translate(w / 2, h / 2);
 
     // outer ring: lit in the deck colour only while playing
-    ctx.lineWidth = Math.max(2, R * 0.045);
-    ctx.strokeStyle = playing ? this.accent : 'rgba(236,232,223,0.16)';
+    ctx.lineWidth = Math.max(2, R * (grabbed ? 0.075 : 0.045));
+    ctx.strokeStyle = lit ? this.accent : 'rgba(236,232,223,0.16)';
     ctx.beginPath();
     ctx.arc(0, 0, R - ctx.lineWidth / 2, 0, Math.PI * 2);
     ctx.stroke();
 
     // position marker: a bar from the label to the groove edge and a dot at the rim
     ctx.rotate(angle);
-    ctx.fillStyle = '#ece8df';
-    const bw = Math.max(2, R * 0.04);
+    ctx.fillStyle = grabbed ? this.accent : '#ece8df';
+    const bw = Math.max(2, R * (grabbed ? 0.06 : 0.04));
     ctx.fillRect(-bw / 2, -R * 0.86, bw, R * 0.46);
-    ctx.fillStyle = playing ? this.accent : '#ece8df';
+    ctx.fillStyle = lit ? this.accent : '#ece8df';
     ctx.beginPath();
-    ctx.arc(0, -R * 0.86, Math.max(2.5, R * 0.055), 0, Math.PI * 2);
+    ctx.arc(0, -R * 0.86, Math.max(2.5, R * (grabbed ? 0.075 : 0.055)), 0, Math.PI * 2);
     ctx.fill();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     return true;

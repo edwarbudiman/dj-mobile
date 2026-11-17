@@ -83,12 +83,12 @@ README.md
 
 ## M3 — Scratching
 
-- [ ] 3.1 Platter/jog UI per deck with rotation tied to playhead (33⅓ rpm equivalent)
-- [ ] 3.2 Touch-scratch: finger on platter grabs the record; angular delta → playhead delta; worklet follows target with smoothing; plays in reverse
-- [ ] 3.3 Release: spin back up to play rate with inertia (or stay stopped if deck paused)
-- [ ] 3.4 Scratch by dragging the zoomed waveform as well
-- [ ] 3.5 Multi-touch: scratch one deck while moving crossfader / other deck; pointer capture; `pointercancel` handled; no stuck "grabbed" state
-- [ ] 3.6 Audio quality: interpolation + rate smoothing so slow scratches do not zipper or click; silence when rate ≈ 0
+- [x] 3.1 Platter/jog UI per deck with rotation tied to playhead (33⅓ rpm equivalent)
+- [x] 3.2 Touch-scratch: finger on platter grabs the record; angular delta → playhead delta; worklet follows target with smoothing; plays in reverse
+- [x] 3.3 Release: spin back up to play rate with inertia (or stay stopped if deck paused)
+- [x] 3.4 Scratch by dragging the zoomed waveform as well
+- [x] 3.5 Multi-touch: scratch one deck while moving crossfader / other deck; pointer capture; `pointercancel` handled; no stuck "grabbed" state
+- [x] 3.6 Audio quality: interpolation + rate smoothing so slow scratches do not zipper or click; silence when rate ≈ 0
 
 ## M4 — Mixing extras, PWA, hardening
 
@@ -114,7 +114,7 @@ README.md
 - [x] 6.2 Public repo `edwarbudiman/dj-mobile` created and pushed with the existing gh login
 - [x] 6.3 Pages enabled from `main` branch root; empty `.nojekyll` present
 - [ ] 6.4 Every asset, worklet, worker, manifest and service-worker path is relative; manifest `start_url` and `scope` are `./`; app works under `/dj-mobile/`
-- [ ] 6.5 Commit and push after each milestone passes review (pushed: M1+M2 · pending: M3, M4, M5)
+- [ ] 6.5 Commit and push after each milestone passes review (pushed: M1+M2, M3 · pending: M4, M5)
 - [ ] 6.6 Live check: https://edwarbudiman.github.io/dj-mobile/ returns 200, worklet and service worker load there
 - Rule: never push secrets or audio files. Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
@@ -127,3 +127,8 @@ README.md
 - M2 round 2: FAIL. All round-1 findings verified fixed. New MAJOR: double-tap reset fires on quick repeated drags (pitch fader, EQ knobs). MINOR: DnB 174→87, failed load leaves "analysing", platter 116 px at 667x300, per-deck pitch range vs sheet, analyzer cancel restarts other deck, overview hit area vs future scratch, fine-drag discoverability, bend + next to Play, popover hides remaining time. Orchestrator browser smoke (Chrome, localhost): load/waveform/BPM OK, worklet verified via OfflineAudioContext (fwd, reverse, half speed, scratch chase); live audible playback NOT verifiable on this machine.
 - M2 round 3: FAIL. 10 of 11 items verified fixed. MAJOR: DnB double-tempo fix now doubles genuine 80–90 BPM tracks (85→170, hip-hop 82→164 at confidence 0.99). MINOR: pitch stepper halves 22 px tall, toasts cover zoom waveform. Back to builder.
 - M2 round 4: PASS (reviewer, Opus). M1+M2 closed, committed and pushed. Carry-over minors for M3 brief: long load-error toast text, stale stepper comment at deck-view.js:203, README must say fader = big moves / readout swipe = fine.
+- M3 pair: builder-m3 (w21:t6, pane w21:p6), reviewer-m3 (w21:t7, pane w21:p7). Close both tabs after M3 is pushed.
+- M3 build 1 (builder-m3): 3.1–3.6 implemented, 98 tests pass. Orchestrator browser smoke: platter grab via pointer events moves the track by the expected 1.8 s/rev, grabbed visuals and dimmed Cue shown, release clears state, no console errors. Awaiting reviewer-m3.
+- M3 round 1 (reviewer-m3): FAIL. MAJOR: glide reference snaps at direction reversals → per-sample speed jump (audible tick). MINOR: stop-bounce wow after abrupt stops, SYNC toast promises align-on-release that doesn't exist, grab-point latency offset. UX: waveform drag too coarse (34 ms/px), platter dead zone 15 % vs 36 % label, portrait scroll on scratch surface stops music, grabbed glow slightly busy. Back to builder-m3.
+- M3 round 2 (reviewer-m3): PASS. Minors m-4 (reversal ducking), m-5 (mouse stuck grab when armed, portrait desktop), m-6 (120 ms hold too short), m-7 (release display jump) sent for one quick fix round before closing, since m-4/m-5 touch 3.5/3.6.
+- M3 round 3 (reviewer-m3): PASS. m-4..m-7 fixed. m-8 (gate attack 0.7 ms) tried by orchestrator and reverted: it breaks the reversal-ducking test (dips to 0.37); kept 0.12 ms, whose worst step equals one ordinary 440 Hz sample step and is masked on music. M3 closed, committed, pushed; builder-m3/reviewer-m3 tabs closed.

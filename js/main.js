@@ -103,10 +103,7 @@ async function loadIntoDeck(deckId, blob, item) {
   });
   if (res.superseded) return;
   if (!res.ok) {
-    toast(`Couldn't load “${item.name}”: ${res.message}. The file may be corrupt or in a format this browser can't decode.`, {
-      kind: 'error',
-      ms: 7000,
-    });
+    toast("Can't play this file (corrupt or unsupported format)", { kind: 'error', ms: 7000 });
     return; // the old track stays loaded, and its analysis keeps running untouched
   }
   cancelAnalysis(deckId); // only now is the previous track's analysis obsolete
@@ -216,18 +213,44 @@ function syncDeck(id) {
     toast(`Deck ${id} pitch range widened to ±${plan.range}% to reach ${him.effectiveBpm.toFixed(1)} BPM.`);
   }
   me.setPitch(plan.pitch);
-  if (me.playing && him.playing) {
-    // Land on the other deck's beat phase with a short seek (the worklet's fade adds SEEK_LATENCY).
-    const delta = phaseAlignDelta({
-      thisPos: me.position,
-      thisGrid: me.grid,
-      otherPos: him.position,
-      otherGrid: him.grid,
-      ratio: plan.ratio,
-    });
-    me.seek(me.position + delta + SEEK_LATENCY * me.rate);
+  if (me.grabbed) {
+    // The hand wins: the tempo is matched now, the beat alignment runs once after the record is let go.
+    pendingAlign[id] = { track: me.track, ratio: plan.ratio };
+    toast(`Deck ${id} synced to ${him.effectiveBpm.toFixed(1)} BPM. Beats align when you let go.`);
+    return;
   }
+  delete pendingAlign[id];
+  alignPhase(me, him, plan.ratio);
   toast(`Deck ${id} synced to ${him.effectiveBpm.toFixed(1)} BPM`);
+}
+
+/** Land on the other deck's beat phase with a short seek (the worklet's fade adds SEEK_LATENCY). Only when both decks play. */
+function alignPhase(me, him, ratio) {
+  if (!(me.playing && him.playing && me.grid && him.grid) || me.grabbed) return;
+  const delta = phaseAlignDelta({
+    thisPos: me.position,
+    thisGrid: me.grid,
+    otherPos: him.position,
+    otherGrid: him.grid,
+    ratio,
+  });
+  me.seek(me.position + delta + SEEK_LATENCY * me.rate);
+}
+
+// SYNC pressed while a record was in a hand: align once the hand lets go and the motor has spun back up.
+const pendingAlign = {};
+const SPIN_UP_WAIT_MS = 200;
+function onGrabChange(deck, e) {
+  if (e.detail.grabbed) return;
+  const job = pendingAlign[deck.id];
+  if (!job) return;
+  delete pendingAlign[deck.id];
+  if (e.detail.reason === 'load') return; // a new track: the sync is moot
+  setTimeout(() => {
+    if (deck.track !== job.track || deck.grabbed || pendingAlign[deck.id]) return;
+    const him = engine.decks[other(deck.id)];
+    if (him && him.loaded) alignPhase(deck, him, job.ratio);
+  }, SPIN_UP_WAIT_MS);
 }
 
 // ---- views --------------------------------------------------------------------------------
@@ -312,13 +335,17 @@ startBtn.addEventListener('click', async () => {
       const deck = engine.decks[id];
       deckViews[id].attach(deck);
       deck.addEventListener('error', (e) => toast(e.detail.message, { kind: 'error' }));
+      deck.addEventListener('grab', (e) => onGrabChange(deck, e));
       deck.addEventListener('grid', (e) => {
         updateSyncButtons();
         if (e.detail.persist) persistGrid(deck, e.detail.grid);
       });
     }
     applyMixer();
-    engine.addEventListener('blocked', () => showOverlay('resume', 'Tap to bring the sound back.'));
+    engine.addEventListener('blocked', () => {
+      releaseAllGrabs('blocked');
+      showOverlay('resume', 'Tap to bring the sound back.');
+    });
     engine.addEventListener('running', () => {
       overlay.hidden = true;
     });
@@ -350,6 +377,19 @@ document.addEventListener(
 
 $('rotate-dismiss').addEventListener('click', () => {
   $('rotate-hint').hidden = true;
+});
+
+// ---- grab safety: a scratch never outlives its finger -------------------------------------
+// Pointer capture covers pointerup / pointercancel / lostpointercapture inside the deck view; these
+// cover the cases where the page itself loses the pointer (app switch, tab hidden, bfcache).
+
+function releaseAllGrabs(reason) {
+  for (const v of Object.values(deckViews)) v.releaseGrab(reason);
+}
+window.addEventListener('blur', () => releaseAllGrabs('blur'));
+window.addEventListener('pagehide', () => releaseAllGrabs('pagehide'));
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) releaseAllGrabs('hidden');
 });
 
 // ---- frame loop: one rAF drives both decks' readouts and canvases -------------------------
