@@ -1,6 +1,19 @@
 // Audio engine: one lazily created AudioContext, user-gesture unlock, master chain, decks.
 //
-// Graph:  deck worklet -> EQ -> volume -> crossfade gain -> master gain -> limiter -> destination
+// Graph (per deck):  worklet -> EQ -> filter (LP, HP) -> volume -> crossfade gain -> master gain
+//                                                          \-> PFL send -> cue bus
+//
+// Output stage. Both paths below are always connected; a pair of mode gains crossfades between them
+// (20 ms), so turning split cue on or off never clicks and never interrupts playback:
+//
+//   normal : master gain -> limiter (stereo) ---------------------------------> normal gain --\
+//   split  : master gain -> mono -> (x mix) -+-> left bus -> limiter L ->|merger ch0|            \
+//            cue bus gain -> mono -> (x 1-mix)/                                   |-> split gain --> destination
+//            master mono ---------------------> right bus -> limiter R ->|merger ch1|            /
+//
+// Split cue is for a Y-split headphone cable: left ear = cue/master mix, right ear = master, both mono
+// and both summed AFTER their own gain stages. Each ear has its own limiter, so a loud cue never ducks the
+// master ear and neither side can clip.
 //
 // Events (EventTarget): 'running' (context is producing audio), 'blocked' (context is
 // suspended/interrupted and needs a user gesture), 'statechange' {state}.
@@ -10,6 +23,54 @@ import { crossfaderGains, faderToGain, FADER_UNITY } from './mixer-math.js';
 
 const PROCESSOR_URL = new URL('./deck-processor.js', import.meta.url).href;
 const SMOOTH = 0.012;
+const MODE_SMOOTH = 0.006; // mode crossfade time constant (about 20 ms to settle)
+
+function makeLimiter(ctx) {
+  const lim = ctx.createDynamicsCompressor();
+  lim.threshold.value = -2;
+  lim.knee.value = 0;
+  lim.ratio.value = 20;
+  lim.attack.value = 0.002;
+  lim.release.value = 0.12;
+  return lim;
+}
+
+/** A gain node that sums whatever reaches it down to one channel ((L + R) / 2). */
+function makeMono(ctx) {
+  const g = ctx.createGain();
+  try {
+    g.channelCount = 1;
+    g.channelCountMode = 'explicit';
+    g.channelInterpretation = 'speakers';
+  } catch {
+    /* an implementation that refuses keeps its stereo sum: still correct once merged */
+  }
+  return g;
+}
+
+/**
+ * Make the destination carry exactly the channels the device has (1 or 2). Some mobile browsers report a
+ * mono destination (maxChannelCount 1) and throw IndexSizeError on channelCount 2, so every step is
+ * guarded and the result says what we ended up with.
+ * @returns {{channels:number, max:number}}
+ */
+export function configureDestination(ctx) {
+  const dest = ctx.destination;
+  const max = Number.isFinite(dest.maxChannelCount) && dest.maxChannelCount > 0 ? dest.maxChannelCount : 2;
+  const want = Math.min(2, max);
+  try {
+    if (dest.channelCount !== want) dest.channelCount = want;
+  } catch {
+    /* keep the browser's default */
+  }
+  try {
+    dest.channelCountMode = 'explicit';
+    dest.channelInterpretation = 'speakers';
+  } catch {
+    /* fixed on some browsers: fine */
+  }
+  return { channels: Number.isFinite(dest.channelCount) ? dest.channelCount : want, max };
+}
 
 export function detectSupport() {
   const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
@@ -36,6 +97,14 @@ export class Engine extends EventTarget {
     this._starting = null;
     this._crossfader = 0.5;
     this._masterPosition = FADER_UNITY;
+    this.splitCue = false; // headphone split-mono cue on (applied once the graph exists)
+    this.cueMix = 0.5; // 0 = left ear all cue, 1 = left ear all master
+    this.destination = { channels: 2, max: 2 };
+  }
+
+  /** The output can carry a separate left and right ear (false on a mono device). */
+  get splitSupported() {
+    return this.destination.max >= 2 && this.destination.channels >= 2;
   }
 
   get state() {
@@ -79,19 +148,12 @@ export class Engine extends EventTarget {
     }
     await ctx.audioWorklet.addModule(PROCESSOR_URL);
 
-    this.master = ctx.createGain();
-    this.master.gain.value = faderToGain(this._masterPosition);
-    this.limiter = ctx.createDynamicsCompressor();
-    this.limiter.threshold.value = -2;
-    this.limiter.knee.value = 0;
-    this.limiter.ratio.value = 20;
-    this.limiter.attack.value = 0.002;
-    this.limiter.release.value = 0.12;
-    this.master.connect(this.limiter);
-    this.limiter.connect(ctx.destination);
+    this.destination = configureDestination(ctx);
+    this._buildOutput(ctx);
 
-    for (const id of ['A', 'B']) this.decks[id] = new Deck(ctx, id, this.master);
+    for (const id of ['A', 'B']) this.decks[id] = new Deck(ctx, id, this.master, this.cueBus);
     this._applyCrossfader();
+    this._applyCue(true);
 
     ctx.addEventListener('statechange', () => this._onStateChange());
     document.addEventListener('visibilitychange', () => {
@@ -107,11 +169,53 @@ export class Engine extends EventTarget {
     return { ok: true };
   }
 
+  _buildOutput(ctx) {
+    this.master = ctx.createGain();
+    this.master.gain.value = faderToGain(this._masterPosition);
+
+    // normal path: master -> limiter -> normal gain -> destination
+    this.limiter = makeLimiter(ctx);
+    this.normalGain = ctx.createGain();
+    this.master.connect(this.limiter);
+    this.limiter.connect(this.normalGain);
+    this.normalGain.connect(ctx.destination);
+
+    // split path: cue bus and master, each summed to mono after its own gain
+    this.cueBus = ctx.createGain();
+    const cueMono = makeMono(ctx);
+    const masterMono = makeMono(ctx);
+    this.cueToLeft = ctx.createGain();
+    this.masterToLeft = ctx.createGain();
+    const leftBus = ctx.createGain();
+    const rightBus = ctx.createGain();
+    this.limiterL = makeLimiter(ctx);
+    this.limiterR = makeLimiter(ctx);
+    const merger = ctx.createChannelMerger(2);
+    this.splitGain = ctx.createGain();
+    this.cueBus.connect(cueMono);
+    this.master.connect(masterMono);
+    cueMono.connect(this.cueToLeft);
+    masterMono.connect(this.masterToLeft);
+    this.cueToLeft.connect(leftBus);
+    this.masterToLeft.connect(leftBus);
+    masterMono.connect(rightBus);
+    leftBus.connect(this.limiterL);
+    rightBus.connect(this.limiterR);
+    this.limiterL.connect(merger, 0, 0);
+    this.limiterR.connect(merger, 0, 1);
+    merger.connect(this.splitGain);
+    this.splitGain.connect(ctx.destination);
+
+    this.normalGain.gain.value = this.splitCue ? 0 : 1;
+    this.splitGain.gain.value = this.splitCue ? 1 : 0;
+  }
+
   _teardown() {
     const ctx = this.ctx;
     this.ctx = null;
     this.decks = {};
     this.master = this.limiter = null;
+    this.cueBus = this.normalGain = this.splitGain = null;
     if (ctx && ctx.state !== 'closed') ctx.close().catch(() => {});
   }
 
@@ -166,6 +270,40 @@ export class Engine extends EventTarget {
     const { a, b } = crossfaderGains(this._crossfader);
     this.decks.A?.setCrossfadeGain(a);
     this.decks.B?.setCrossfadeGain(b);
+  }
+
+  /**
+   * Split-mono headphone cue on/off. Refused (returns false, stays off) when the output has only one
+   * channel. Crossfades between the two output paths over ~20 ms: no click, playback never stops.
+   */
+  setSplitCue(on) {
+    const want = !!on;
+    if (want && this.ctx && !this.splitSupported) return false;
+    this.splitCue = want;
+    this._applyCue(false);
+    return true;
+  }
+
+  /** Left ear balance: 0 = all cue, 1 = all master (equal-power). */
+  setCueMix(m) {
+    this.cueMix = Number.isFinite(m) ? Math.min(1, Math.max(0, m)) : 0.5;
+    this._applyCue(false);
+  }
+
+  _applyCue(immediate) {
+    if (!this.ctx || !this.cueToLeft) return;
+    const t = this.ctx.currentTime;
+    const { a, b } = crossfaderGains(this.cueMix); // a = cue, b = master
+    this.cueToLeft.gain.setTargetAtTime(a, t, SMOOTH);
+    this.masterToLeft.gain.setTargetAtTime(b, t, SMOOTH);
+    const split = this.splitCue && this.splitSupported;
+    if (immediate) {
+      this.normalGain.gain.value = split ? 0 : 1;
+      this.splitGain.gain.value = split ? 1 : 0;
+      return;
+    }
+    this.normalGain.gain.setTargetAtTime(split ? 0 : 1, t, MODE_SMOOTH);
+    this.splitGain.gain.setTargetAtTime(split ? 1 : 0, t, MODE_SMOOTH);
   }
 
   /** Master fader position 0..1. */

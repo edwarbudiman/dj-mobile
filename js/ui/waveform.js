@@ -11,6 +11,20 @@ import { beatsInRange } from '../audio/sync-math.js';
 export const ZOOM_SECONDS = 8;
 const MAX_DPR = 3;
 const SEEK_THROTTLE_MS = 40;
+const HC_FALLBACK = ['#b6f23a', '#7b8cff', '#d27bff', '#ffe14d']; // hot cue colours (css --hc1..4)
+const FLAG_FONT = '800 10px ui-monospace, Menlo, Consolas, monospace';
+
+// A numbered hot cue flag hanging from the top edge at x: line down the full height, a coloured tab with the cue number.
+function drawHotCue(ctx, x, h, color, n, size, ink) {
+  ctx.fillStyle = color;
+  ctx.fillRect(x - 1, 0, 2, h);
+  ctx.fillRect(x + 1, 0, size, size);
+  ctx.fillStyle = ink;
+  ctx.font = FLAG_FONT;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(n), x + 1 + size / 2, size / 2 + 0.5);
+}
 
 class Surface {
   constructor(canvas) {
@@ -22,7 +36,7 @@ class Surface {
     this.w = 0;
     this.h = 0;
     this.dpr = 1;
-    this.colors = { accent: '#38d4ff', well: '#0e0f10', cue: '#ffb62e' };
+    this.colors = { accent: '#38d4ff', well: '#0e0f10', cue: '#ffb62e', loop: '#ece8df', hc: HC_FALLBACK };
     this.min = new Float32Array(0);
     this.max = new Float32Array(0);
     if (typeof ResizeObserver === 'function') {
@@ -72,6 +86,8 @@ class Surface {
       accent: cs.getPropertyValue('--accent').trim() || this.colors.accent,
       well: cs.getPropertyValue('--well').trim() || this.colors.well,
       cue: cs.getPropertyValue('--cue').trim() || this.colors.cue,
+      loop: cs.getPropertyValue('--loop').trim() || this.colors.loop,
+      hc: HC_FALLBACK.map((c, i) => cs.getPropertyValue('--hc' + (i + 1)).trim() || c),
     };
     const cols = Math.ceil(r.width) + 3;
     if (this.min.length < cols) {
@@ -176,8 +192,8 @@ export class Overview extends Surface {
     this.cache = c;
   }
 
-  /** @param {{pos:number, duration:number, cue:number}} s */
-  draw({ pos, duration, cue }) {
+  /** @param {{pos:number, duration:number, cue:number, hotCues?:(number|null)[], loop?:{start:number,end:number}|null}} s */
+  draw({ pos, duration, cue, hotCues, loop }) {
     if (!this.fit()) return;
     if (this.cacheDirty) this._buildCache();
     const { ctx, w, h } = this;
@@ -194,6 +210,24 @@ export class Overview extends Surface {
       const cx = Math.round((cue / duration) * w);
       ctx.fillStyle = this.colors.cue;
       ctx.fillRect(cx, 0, 2, h);
+    }
+    if (loop) {
+      // at least 3 px wide so a short loop on a long track is still visible
+      const x1 = Math.round((loop.start / duration) * w);
+      const x2 = Math.max(x1 + 3, Math.round((loop.end / duration) * w));
+      ctx.fillStyle = this.colors.loop;
+      ctx.globalAlpha = 0.28;
+      ctx.fillRect(x1, 0, x2 - x1, h);
+      ctx.globalAlpha = 1;
+      ctx.fillRect(x1, 0, x2 - x1, 2);
+      ctx.fillRect(x1, h - 2, x2 - x1, 2);
+    }
+    if (hotCues) {
+      for (let i = 0; i < hotCues.length; i++) {
+        if (hotCues[i] == null) continue;
+        const x = Math.min(w - 12, Math.max(1, Math.round((hotCues[i] / duration) * w)));
+        drawHotCue(ctx, x, h, this.colors.hc[i], i + 1, 11, '#0e0f10');
+      }
     }
     ctx.fillStyle = '#ece8df';
     ctx.fillRect(Math.round(playedX) - 1, 0, 2, h);
@@ -247,7 +281,7 @@ export class ZoomWave extends Surface {
   }
 
   /** @param {{pos:number, duration:number, cue:number, grid:{bpm:number,offset:number}|null, grabbed?:boolean}} s */
-  draw({ pos, duration, cue, grid, grabbed = false }) {
+  draw({ pos, duration, cue, grid, grabbed = false, hotCues, loop }) {
     if (!this.fit()) return;
     this._ease();
     const { ctx, w, h } = this;
@@ -288,6 +322,31 @@ export class ZoomWave extends Surface {
           ctx.fillStyle = 'rgba(236,232,223,0.38)';
           ctx.fillRect(x, h * 0.22, 1, h * 0.56);
         }
+      }
+    }
+    if (loop) {
+      // the looped stretch is tinted and capped top and bottom; the edges are marked so you see where it wraps
+      const x1 = centre + (loop.start - pos) / secPerPx;
+      const x2 = centre + (loop.end - pos) / secPerPx;
+      const a = Math.max(0, Math.round(x1));
+      const b = Math.min(w, Math.round(x2));
+      if (b > a) {
+        ctx.fillStyle = this.colors.loop;
+        ctx.globalAlpha = 0.2;
+        ctx.fillRect(a, 0, b - a, h);
+        ctx.globalAlpha = 1;
+        ctx.fillRect(a, 0, b - a, 3);
+        ctx.fillRect(a, h - 3, b - a, 3);
+        if (x1 >= 0 && x1 <= w) ctx.fillRect(Math.round(x1), 0, 2, h);
+        if (x2 >= 0 && x2 <= w) ctx.fillRect(Math.round(x2) - 2, 0, 2, h);
+      }
+    }
+    if (hotCues) {
+      for (let i = 0; i < hotCues.length; i++) {
+        if (hotCues[i] == null) continue;
+        const x = Math.round(centre + (hotCues[i] - pos) / secPerPx);
+        if (x < -2 || x > w + 14) continue;
+        drawHotCue(ctx, x, h, this.colors.hc[i], i + 1, h < 50 ? 13 : 15, '#0e0f10');
       }
     }
     const cx = Math.round(centre + (cue - pos) / secPerPx);

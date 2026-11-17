@@ -92,13 +92,13 @@ README.md
 
 ## M4 — Mixing extras, PWA, hardening
 
-- [ ] 4.1 Per-deck filter knob (LP/HP sweep) and hot cues (4 per deck, persisted)
-- [ ] 4.2 Loop: auto-loop 1/2/4/8 beats (needs grid), exit
-- [ ] 4.3 Optional split-mono headphone cue with per-deck CUE buttons and cue/master mix
+- [x] 4.1 Per-deck filter knob (LP/HP sweep) and hot cues (4 per deck, persisted)
+- [x] 4.2 Loop: auto-loop 1/2/4/8 beats (needs grid), exit
+- [x] 4.3 Optional split-mono headphone cue with per-deck CUE buttons and cue/master mix
 - [ ] 4.4 PWA: manifest, icons, service worker precache with versioned cache, works offline after first load, update flow does not strand old cache
 - [ ] 4.5 iOS quirks: silent-switch workaround, `interrupted` state recovery, safe-area insets, no double-tap zoom, wake lock where available
 - [ ] 4.6 Memory guard: warn on very long/large files; free previous buffer on reload; two decks of 10-min tracks must work on a phone
-- [ ] 4.7 Built-in demo loops (synthesized in-app, two different BPMs) so the app is playable with zero files
+- [x] 4.7 Built-in demo loops (synthesized in-app, two different BPMs) so the app is playable with zero files
 - [ ] 4.8 README: run locally, open on a phone (LAN + https options), install to home screen, controls guide, known limits
 - [ ] 4.9 Unit tests (`node --test tests/`) for bpm-core, peaks, crossfader curve, sync math, playhead math; all green
 
@@ -132,3 +132,9 @@ README.md
 - M3 round 1 (reviewer-m3): FAIL. MAJOR: glide reference snaps at direction reversals → per-sample speed jump (audible tick). MINOR: stop-bounce wow after abrupt stops, SYNC toast promises align-on-release that doesn't exist, grab-point latency offset. UX: waveform drag too coarse (34 ms/px), platter dead zone 15 % vs 36 % label, portrait scroll on scratch surface stops music, grabbed glow slightly busy. Back to builder-m3.
 - M3 round 2 (reviewer-m3): PASS. Minors m-4 (reversal ducking), m-5 (mouse stuck grab when armed, portrait desktop), m-6 (120 ms hold too short), m-7 (release display jump) sent for one quick fix round before closing, since m-4/m-5 touch 3.5/3.6.
 - M3 round 3 (reviewer-m3): PASS. m-4..m-7 fixed. m-8 (gate attack 0.7 ms) tried by orchestrator and reverted: it breaks the reversal-ducking test (dips to 0.37); kept 0.12 ms, whose worst step equals one ordinary 440 Hz sample step and is masked on music. M3 closed, committed, pushed; builder-m3/reviewer-m3 tabs closed.
+- M4 pair: builder-m4 (w21:t8, pane w21:p8), reviewer-m4 (w21:t9, pane w21:p9). M4 runs as two loops with this pair: part A = 4.1, 4.2, 4.3, 4.7; part B = 4.4, 4.5, 4.6, 4.8, 4.9. Close both tabs after M4 is pushed.
+- M4A build 1 (builder-m4): 4.1/4.2/4.3/4.7 implemented, 155 tests pass. Orchestrator browser smoke (667x375 + 667x300 frames): demos listed with DEMO tag and load with 122/128 BPM, split cue On shows PFL + Mix, Pads Cues/Loops pages fit, hot cue flag and 4-beat loop region drawn. UX issue found: the Pads page label "Cues" sits right beside the "Cue" transport button (easy to confuse). Awaiting reviewer-m4.
+- M4A round 1 (reviewer-m4): FAIL. MAJOR: heard position not loop-aware (grab right after a wrap jumps out and drops the loop). MINOR: filter Q in dB, demo build slices too long for phones, Clear mode survives track load, Mix knob hidden in portrait, demo cache never freed (→4.6), node --test tests/ (→4.9). UX: Pads cycle (toggle + page switch), hc3/hc4 colours, orchestrator's Cue vs "Cues" label clash. Full report: tests/_review/m4a-report.md. Back to builder-m4.
+- M4A build 2: fixes in, 162 tests in ~14 s. Orchestrator browser smoke: Pads button always reads "Pads", page switch in the grid, 4 distinct hot-cue colours with numbered flags, both demos built with max rAF frame gap 15 ms (no visible stall). Awaiting reviewer-m4 round 2.
+- M4A round 2 (reviewer-m4): FAIL. Round-1 items verified; Worker path sound. New MAJOR M-2: loop fold misfires on Play from the loop start (heard position outside the loop for 60–130 ms). MINOR m-7 loop exit jump, m-8 hot-cue jump flash, m-9 demo worker timeout, m-10 mint hc4. Report: tests/_review/m4a-report-r2.md. Back to builder-m4.
+- M4A round 3 (reviewer-m4): PASS. Loop-aware heard position verified end to end (real processor → Deck) at 20/60/150 ms; m-7..m-10 fixed. 4.1, 4.2, 4.3, 4.7 closed, committed and pushed. Carry to part B: m-5 demo PCM cache (4.6), m-6 test command wording (4.9), demo-worker.js/demo-loader.js in the SW precache (4.4), README notes (fader = big moves, readout swipe = fine; loops need a grid; split cue needs a Y cable).

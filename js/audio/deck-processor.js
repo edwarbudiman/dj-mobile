@@ -33,12 +33,36 @@
 // (about 21 ms at 60 Hz, 12 ms at 120 Hz). Rate is capped at MAX_SCRATCH_RATE.
 // Edges: the playhead clamps at 0 / last without a click and without posting 'ended'; only free-running
 // play (including the spin-up after a release) reaching the end of the track ends playback.
+//   { type:'loop', on:true, start, end }   loop [start, end) seconds (track time). Free-running playback
+//                                          wraps sample-accurately at the seam (forward at `end`, reverse at
+//                                          `start`); the position is folded into the loop by whole loop
+//                                          lengths, so the length is exact over any number of repeats. The seam
+//                                          is a LOOP_XFADE_SECONDS equal-level crossfade: after the wrap, the
+//                                          audio that would have played on (the "ghost") fades out while the
+//                                          wrapped audio fades in, so there is no step. The loop is in track
+//                                          time, so pitch changes do not alter it. While a finger holds the
+//                                          record the loop is suspended; on release the loop continues if the
+//                                          record is inside it, otherwise the loop is dropped.
+//   { type:'loop', on:false }              exit: playback just carries on past the loop end
+//                                          Invalid loops (non-finite, shorter than 20 ms, outside the track,
+//                                          too close to the track end for the crossfade) are ignored.
 // Messages out (worklet -> main):
-//   { type:'pos', pos, ctxTime, speed }    pos seconds; ctxTime = context time of that pos;
-//                                          speed = track-seconds per context-second (0 when stopped)
+//   { type:'pos', pos, ctxTime, speed, wrap, wrapLen }
+//                                          pos seconds; ctxTime = context time of that pos;
+//                                          speed = track-seconds per context-second (0 when stopped);
+//                                          wrap = context time at which the most recent loop wrap happened
+//                                          (-1 if none since the last seek / grab / loop set / load) and wrapLen
+//                                          = how far (track seconds) that wrap moved the position. The main
+//                                          thread needs this to place the audio the LISTENER hears (output latency
+//                                          behind the engine): heard times earlier than `wrap` are on the previous
+//                                          repeat. It stays valid after a loop exit.
 //   { type:'ended', pos, edge }            faded out at the 'end' or 'start' of the track
+//   { type:'loop', on:false, reason }      the loop was dropped by the processor: a seek or a scratch release
+//                                          landed outside it ('seek' | 'scratch')
 
 const RAMP_SECONDS = 0.006; // play/pause/seek/edge gain ramp
+const LOOP_XFADE_SECONDS = 0.008; // loop seam crossfade (loop-math.js LOOP_XFADE mirrors this)
+const LOOP_MIN_SECONDS = 0.02;
 const RATE_TAU = 0.004; // playback-rate smoothing time constant
 const SCRATCH_TAU = 0.004; // playhead follows the glide reference with this lag (velocity low-pass)
 const MOTOR_TAU = 0.03; // release spin-up: rate settles on the play rate (95 % in ~90 ms); mirrors scratch-math.js
@@ -108,6 +132,14 @@ class DeckProcessor extends AudioWorkletProcessor {
     this.lastSpeed = 0;
     this.outL = 0;
     this.outR = 0;
+    this.loopOn = false;
+    this.loopStart = 0; // track frames
+    this.loopEnd = 0;
+    this.loopLen = 0;
+    this.loopGhost = 0; // where the audio would be without the wrap, while the seam crossfades
+    this.loopXfLeft = 0; // output frames of seam crossfade still to run
+    this.loopWrapTime = -1; // context time of the most recent wrap (-1: none since the last seek / grab / loop set / load)
+    this.loopWrapLen = 0; // the loop length (track seconds) that wrap folded by
     this.port.onmessage = (e) => this.onMessage(e.data);
   }
 
@@ -146,8 +178,34 @@ class DeckProcessor extends AudioWorkletProcessor {
       case 'scratch':
         this.onScratch(m);
         break;
+      case 'loop':
+        this.onLoop(m);
+        break;
     }
     this.dirty = true;
+  }
+
+  onLoop(m) {
+    if (m.on === false) {
+      this.loopOn = false; // a seam crossfade already running finishes by itself
+      return;
+    }
+    if (!this.left || !Number.isFinite(m.start) || !Number.isFinite(m.end)) return;
+    const s = m.start * this.trackRate;
+    const e = m.end * this.trackRate;
+    if (!(s >= 0) || !(e - s >= LOOP_MIN_SECONDS * this.trackRate)) return;
+    if (e + LOOP_XFADE_SECONDS * this.trackRate > this.length - 1) return;
+    this.loopStart = s;
+    this.loopEnd = e;
+    this.loopLen = e - s;
+    this.loopOn = true;
+    this.loopWrapTime = -1; // a new loop has not wrapped yet: entering it is not a wrap
+  }
+
+  dropLoop(reason) {
+    this.loopOn = false;
+    this.loopXfLeft = 0;
+    this.port.postMessage({ type: 'loop', on: false, reason });
   }
 
   onScratch(m) {
@@ -177,6 +235,8 @@ class DeckProcessor extends AudioWorkletProcessor {
       this.scratchLastT = NaN;
       this.braking = false;
       this.spinUp = false;
+      this.loopXfLeft = 0; // the hand takes over: no seam crossfade runs under it
+      this.loopWrapTime = -1;
       this.pendingSeek = at === at ? at : null;
     }
     this.releasing = false;
@@ -242,6 +302,9 @@ class DeckProcessor extends AudioWorkletProcessor {
     this.releasing = false;
     this.spinUp = false;
     this.braking = false;
+    this.loopOn = false;
+    this.loopXfLeft = 0;
+    this.loopWrapTime = -1;
     this.lastSpeed = 0;
     this.dirty = true;
   }
@@ -303,6 +366,9 @@ class DeckProcessor extends AudioWorkletProcessor {
     const mutePastCoast = PULL_MUTE_COAST_INTERVALS * this.scratchInterval * sampleRate;
     const pgUpAlpha = 1 - Math.exp(-1 / (PULL_UNMUTE_TAU * sampleRate));
     let delta = 0;
+    const xfTotal = Math.max(2, Math.round(LOOP_XFADE_SECONDS * sampleRate));
+    let xfLeft = this.loopXfLeft;
+    let ghost = this.loopGhost;
 
     for (let i = 0; i < n; i++) {
       // Release: playing -> hand the record to the motor at once; paused -> let the record settle on the
@@ -314,6 +380,8 @@ class DeckProcessor extends AudioWorkletProcessor {
         this.spinUp = this.playing;
         this.braking = !this.playing;
         this.dirty = true;
+        // Let go inside the loop: it carries on. Let go outside it: the loop is dropped.
+        if (this.loopOn && (pos < this.loopStart || pos >= this.loopEnd)) this.dropLoop('scratch');
       }
 
       const wantOn = (this.playing || scratching) && this.pendingSeek === null && this.pendingLoad === null;
@@ -352,12 +420,17 @@ class DeckProcessor extends AudioWorkletProcessor {
           gain = this.gain;
           rate = this.rate;
           gate = this.gate;
+          xfLeft = 0;
           break; // sample rate / length may have changed; resume on the next block
         }
         if (this.pendingSeek !== null) {
           pos = this.pendingSeek;
           this.pendingSeek = null;
           this.dirty = true;
+          this.loopXfLeft = 0;
+          this.loopWrapTime = -1; // a seek is a jump, not a wrap
+          xfLeft = 0;
+          if (!scratching && this.loopOn && (pos < this.loopStart || pos >= this.loopEnd)) this.dropLoop('seek');
           if (scratching) {
             // a grab jumped to the heard position: the glide restarts from there
             ref = pos;
@@ -427,6 +500,17 @@ class DeckProcessor extends AudioWorkletProcessor {
       gate += (gateGoal - gate) * (gateGoal > gate ? gateUpAlpha : gateAlpha);
 
       this.read(pos);
+      if (xfLeft > 0) {
+        // Loop seam: blend from the audio that would have played on (ghost) into the wrapped audio.
+        const l1 = this.outL;
+        const r1 = this.outR;
+        this.read(ghost);
+        const w = 1 - xfLeft / xfTotal; // weight of the wrapped audio: 0 at the seam, 1 at the end
+        this.outL += (l1 - this.outL) * w;
+        this.outR += (r1 - this.outR) * w;
+        ghost += delta;
+        xfLeft--;
+      }
       // Stop bounce: when no event has arrived for 1.5 of the measured event intervals, the finger has
       // stopped, and any motion AGAINST the direction it was last moving is the record settling back after
       // coasting past it. That crawl is faded out instead of being heard as a "wow". A real reversal keeps
@@ -437,6 +521,27 @@ class DeckProcessor extends AudioWorkletProcessor {
       outL[i] = this.outL * g;
       outR[i] = this.outR * g;
       pos += delta;
+      if (this.loopOn && !scratching) {
+        // Sample-accurate wrap: fold by whole loop lengths so the fractional position (and with it the
+        // loop length) never drifts. The ghost carries on from the unwrapped position for the crossfade.
+        if (delta > 0 && pos >= this.loopEnd) {
+          let k = Math.floor((pos - this.loopStart) / this.loopLen);
+          if (k < 1) k = 1;
+          ghost = pos;
+          xfLeft = xfTotal;
+          pos -= k * this.loopLen;
+          this.loopWrapTime = currentTime + (i + 1) / sampleRate; // the position jumped between sample i and i + 1
+          this.loopWrapLen = (k * this.loopLen) / this.trackRate;
+        } else if (delta < 0 && pos < this.loopStart) {
+          let k = Math.ceil((this.loopStart - pos) / this.loopLen);
+          if (k < 1) k = 1;
+          ghost = pos;
+          xfLeft = xfTotal;
+          pos += k * this.loopLen;
+          this.loopWrapTime = currentTime + (i + 1) / sampleRate;
+          this.loopWrapLen = (k * this.loopLen) / this.trackRate;
+        }
+      }
       if (scratching || this.spinUp || this.braking) {
         // Hard clamp at the track edges while the hand or the motor is in charge: no click, no 'ended'.
         // Momentum heading away from the play direction dies at the edge; momentum in the play direction
@@ -456,6 +561,8 @@ class DeckProcessor extends AudioWorkletProcessor {
     this.scratchRefVel = refVel;
     this.scratchPull = pull;
     this.pullGain = pg;
+    this.loopXfLeft = xfLeft;
+    this.loopGhost = ghost;
     this.sinceEvent += n;
     const fast = this.scratchTarget !== null || this.spinUp || this.braking;
     this.lastSpeed = gain > 0 ? rate : 0; // rate is already track-seconds per context-second
@@ -470,6 +577,8 @@ class DeckProcessor extends AudioWorkletProcessor {
         pos: this.trackRate > 0 ? pos / this.trackRate : 0,
         ctxTime: currentTime + n / sampleRate,
         speed: this.lastSpeed,
+        wrap: this.loopWrapTime,
+        wrapLen: this.loopWrapLen,
       });
     }
     return true;

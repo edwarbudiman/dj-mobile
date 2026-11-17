@@ -5,7 +5,9 @@ import { formatBytes, formatDuration } from './format.js';
 
 /**
  * @param {HTMLElement} root  the sheet element
- * @param {{onAdd:(deck:string|null)=>void, onLoad:(id:string, deck:string)=>void, onDelete:(id:string)=>void}} h
+ * @param {{onAdd:(deck:string|null)=>void, onLoad:(id:string, deck:string)=>void, onDelete:(id:string)=>void,
+ *          onSplitCue:(on:boolean)=>boolean}} h  onSplitCue returns whether the change was accepted
+ * Demo items ({demo:true}) are labelled DEMO and have no Delete button.
  */
 export function createLibraryView(root, h) {
   root.innerHTML = `
@@ -17,6 +19,14 @@ export function createLibraryView(root, h) {
       </header>
       <section class="settings" aria-label="Settings">
         <div class="setting"><span class="setting-name">Master volume</span><div class="setting-control" data-role="master-slot"></div></div>
+        <div class="setting">
+          <span class="setting-name">Split headphone cue</span>
+          <div class="setting-control"><div class="seg" role="group" aria-label="Split headphone cue">
+            <button type="button" class="btn" data-split="off" aria-pressed="true">Off</button>
+            <button type="button" class="btn" data-split="on" aria-pressed="false">On</button>
+          </div></div>
+        </div>
+        <p class="setting-note" data-role="split-note">Needs a Y-split headphone cable: left ear = cue, right ear = master.</p>
       </section>
       <p class="sheet-note" data-role="note" hidden></p>
       <ul class="track-list" data-role="list"></ul>
@@ -38,6 +48,18 @@ export function createLibraryView(root, h) {
     root.dataset.target = deck || '';
     root.hidden = false;
   }
+  const splitBtns = [...root.querySelectorAll('[data-split]')];
+  const splitNote = $('split-note');
+  const SPLIT_NOTE = splitNote.textContent;
+  function setSplit(on) {
+    for (const b of splitBtns) b.setAttribute('aria-pressed', String((b.dataset.split === 'on') === on));
+  }
+  for (const b of splitBtns) {
+    b.addEventListener('click', () => {
+      const want = b.dataset.split === 'on';
+      if (h.onSplitCue(want) !== false) setSplit(want);
+    });
+  }
   $('add').addEventListener('click', () => h.onAdd(target));
   $('close').addEventListener('click', close);
   root.addEventListener('click', (e) => {
@@ -53,10 +75,16 @@ export function createLibraryView(root, h) {
     info.className = 'track-info';
     const name = document.createElement('div');
     name.className = 'track-name';
-    name.textContent = item.name;
+    if (item.demo) {
+      const tag = document.createElement('span');
+      tag.className = 'demo-tag';
+      tag.textContent = 'DEMO';
+      name.append(tag);
+    }
+    name.append(item.name);
     const meta = document.createElement('div');
     meta.className = 'track-meta';
-    const bits = [formatDuration(item.duration), formatBytes(item.size)];
+    const bits = item.demo ? ['Built-in loop', formatDuration(item.duration)] : [formatDuration(item.duration), formatBytes(item.size)];
     if (item.bpm > 0) bits.push(`${item.bpm.toFixed(1)} BPM`);
     if (item.sessionOnly) bits.push('this session only');
     meta.textContent = bits.join('  ');
@@ -95,7 +123,7 @@ export function createLibraryView(root, h) {
         del.classList.remove('armed');
       }, 3000);
     });
-    actions.appendChild(del);
+    if (!item.demo) actions.appendChild(del);
     li.append(info, actions);
     return li;
   }
@@ -107,10 +135,17 @@ export function createLibraryView(root, h) {
       return !root.hidden;
     },
     masterSlot: $('master-slot'),
+    /** Reflect the split-cue state; supported:false (mono output) disables On and says why. */
+    setSplitCue(on, { supported = true } = {}) {
+      setSplit(on);
+      splitBtns.find((b) => b.dataset.split === 'on').disabled = !supported;
+      splitNote.dataset.warn = String(!supported);
+      splitNote.textContent = supported ? SPLIT_NOTE : 'This device has a mono audio output, so split cue is not available.';
+    },
     /** @param {object[]} items  @param {{persistent:boolean}} state */
     render(items, { persistent }) {
       list.replaceChildren(...items.map(row));
-      empty.hidden = items.length > 0;
+      empty.hidden = items.some((t) => !t.demo);
       note.hidden = persistent;
       note.textContent = persistent ? '' : 'Storage is unavailable here, so tracks are kept for this session only.';
     },

@@ -3,8 +3,10 @@
 //   readout   [A] 128.0 BPM                         -3:42.1      <- 20px numerals
 //   zoom      full-bleed scrolling waveform (title, elapsed, beat dots overlaid)
 //   overview  thin whole-track strip (tap / drag to seek)
-//   lower     [ pitch strip | platter                | tools ]
+//   lower     [ pitch strip | platter or pads         | tools ]
 //             [ (outer edge) | Play  Cue (outer corner) |       ]
+//   Tools (top to bottom): Grid, Tap, Sync, Pads. Pads toggles the pad grid, which takes the platter's
+//   place (transport and pitch strip stay put); a switch inside the grid picks hot cues or loops.
 //
 // The Deck (audio side) is attached after the engine starts; until then the controls are disabled.
 
@@ -12,6 +14,7 @@ import { LOW_CONFIDENCE } from '../audio/bpm-core.js';
 import { beatPosition, faderToPitch, pitchToFader, retempo, shiftGrid, tapTempo } from '../audio/sync-math.js';
 import { createFader } from './fader.js';
 import { formatRemaining, formatTime } from './format.js';
+import { createPads } from './pads.js';
 import { Platter } from './platter.js';
 import { createScratch } from './scratch.js';
 import { Overview, ZoomWave } from './waveform.js';
@@ -42,6 +45,7 @@ const TEMPLATE = `
       <div class="pitch-slot" data-role="pitch-slot"></div>
     </div>
     <div class="platter-slot" data-slot="platter"><canvas data-role="platter"></canvas></div>
+    <div class="pads" data-role="pads" hidden></div>
     <div class="transport">
       <button type="button" class="btn btn-play" data-role="play" disabled>Play</button>
       <button type="button" class="btn btn-cue" data-role="cue" disabled>Cue</button>
@@ -50,6 +54,7 @@ const TEMPLATE = `
       <button type="button" class="btn btn-quiet" data-role="grid" aria-haspopup="true" aria-expanded="false" disabled>Grid</button>
       <button type="button" class="btn btn-quiet" data-role="tap" disabled>Tap</button>
       <button type="button" class="btn btn-quiet btn-sync" data-role="sync" aria-disabled="true">Sync</button>
+      <button type="button" class="btn btn-quiet btn-pads" data-role="pads-btn" aria-pressed="false" aria-label="Pads: hot cues and loops" disabled>Pads</button>
     </div>
   </div>
   <div class="popover" data-role="panel" role="dialog" aria-label="Beat grid" hidden>
@@ -101,6 +106,7 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
   const playBtn = $('play');
   const tapBtn = $('tap');
   const syncBtn = $('sync');
+  const padsBtn = $('pads-btn');
   const gridBtn = $('grid');
   const bendUp = $('bend-up');
   const bendDown = $('bend-down');
@@ -137,6 +143,30 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
     platterEl: platter.element,
     waveEl: zoomSlot,
     secondsPerPixel: () => zoom.secondsPerPixel,
+  });
+
+  // Pads: the pad grid takes the platter's place. The tool button only toggles it (lit while open; its label
+  // is always "Pads", never "Cue", which is the transport button). The page (hot cues / loops) is switched
+  // by the bottom-right cell inside the grid; the last page used comes back when the grid is reopened.
+  let lastPadPage = 'cues';
+  const pads = createPads($('pads'), {
+    id,
+    getDeck: () => deck,
+    notify,
+    onPage: (page) => {
+      lastPadPage = page;
+      root.dataset.pads = page;
+    },
+  });
+  function setPadsPage(page) {
+    pads.setPage(page);
+    root.dataset.pads = page || '';
+    padsBtn.classList.toggle('on', page !== null);
+    padsBtn.setAttribute('aria-pressed', String(page !== null));
+  }
+  padsBtn.addEventListener('click', () => {
+    if (pads.page) setPadsPage(null);
+    else setPadsPage(lastPadPage);
   });
 
   loadBtn.addEventListener('click', onLoadClick);
@@ -322,7 +352,8 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
 
   function syncEnabled() {
     const on = !!deck && deck.loaded;
-    cueBtn.disabled = playBtn.disabled = tapBtn.disabled = gridBtn.disabled = bendUp.disabled = bendDown.disabled = !on;
+    cueBtn.disabled = playBtn.disabled = tapBtn.disabled = gridBtn.disabled = bendUp.disabled = bendDown.disabled = padsBtn.disabled = !on;
+    pads.refresh();
     for (const b of panel.querySelectorAll('[data-act]')) b.disabled = b.dataset.act === 'range' ? !on : !(on && deck.grid);
     zoomSlot.classList.toggle('has-track', on);
     overSlot.classList.toggle('has-track', on);
@@ -340,7 +371,7 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
   function syncTitle() {
     if (!deck) return;
     root.classList.toggle('loading', deck.loading);
-    titleEl.textContent = deck.loading ? 'Decoding…' : deck.track ? deck.track.name : '';
+    titleEl.textContent = deck.loading ? deck.loadingLabel : deck.track ? deck.track.name : '';
     titleEl.title = deck.track ? deck.track.name : '';
     loadBtn.hidden = deck.loaded || deck.loading;
   }
@@ -397,6 +428,7 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
         syncTitle();
       });
       d.addEventListener('track', () => {
+        pads.disarm(); // an armed Clear must never delete a cue of the NEW track
         syncTitle();
         syncEnabled();
         taps = [];
@@ -417,7 +449,16 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
       d.addEventListener('cue', () => {
         redraw = true;
       });
+      d.addEventListener('hotcues', () => {
+        pads.refresh();
+        redraw = true;
+      });
+      d.addEventListener('loop', () => {
+        pads.refresh();
+        redraw = true;
+      });
       d.addEventListener('grid', () => {
+        pads.refresh();
         renderBpm();
         syncEnabled();
         redraw = true;
@@ -489,7 +530,7 @@ export function createDeckView(root, { id, onLoadClick, onSync, notify = () => {
       if (dirty || deck.moving || pos !== shown.pos) {
         shown.pos = pos;
         redraw = false;
-        const state = { pos, duration: deck.duration, cue: deck.cue, grid, grabbed };
+        const state = { pos, duration: deck.duration, cue: deck.cue, grid, grabbed, hotCues: deck.hotCues, loop: deck.loop };
         overview.draw(state);
         zoom.draw(state);
       }

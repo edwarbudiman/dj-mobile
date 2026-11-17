@@ -11,6 +11,9 @@ import { createMixerView } from './ui/mixer-view.js';
 import { createLibraryView } from './ui/library-view.js';
 import { createFader } from './ui/fader.js';
 import { LOW_CONFIDENCE } from './audio/bpm-core.js';
+import { sanitizeHotCues } from './audio/cue-math.js';
+import { DEMOS, demoDuration } from './audio/demo-synth.js';
+import { buildDemo } from './audio/demo-loader.js';
 
 const $ = (id) => document.getElementById(id);
 const toast = createToaster($('toasts'));
@@ -21,18 +24,44 @@ const other = (id) => (id === 'A' ? 'B' : 'A');
 
 // ---- mixer state (UI is the source of truth; pushed to the engine once it exists) ---------
 
+const SPLIT_KEY = 'dj-mobile.splitCue';
+function readSplitSetting() {
+  try {
+    return localStorage.getItem(SPLIT_KEY) === 'on';
+  } catch {
+    return false;
+  }
+}
+function writeSplitSetting(on) {
+  try {
+    localStorage.setItem(SPLIT_KEY, on ? 'on' : 'off');
+  } catch {
+    /* not persisted: fine */
+  }
+}
+
 const mixer = {
   master: FADER_UNITY,
   crossfader: 0.5,
+  split: readSplitSetting(), // split-mono headphone cue (off by default)
+  cueMix: 0.5,
   decks: {
-    A: { volume: FADER_UNITY, high: FADER_UNITY, mid: FADER_UNITY, low: FADER_UNITY },
-    B: { volume: FADER_UNITY, high: FADER_UNITY, mid: FADER_UNITY, low: FADER_UNITY },
+    A: { volume: FADER_UNITY, high: FADER_UNITY, mid: FADER_UNITY, low: FADER_UNITY, filter: 0.5, pfl: false },
+    B: { volume: FADER_UNITY, high: FADER_UNITY, mid: FADER_UNITY, low: FADER_UNITY, filter: 0.5, pfl: false },
   },
 };
 
 function applyMixer() {
   engine.setMaster(mixer.master);
   engine.setCrossfader(mixer.crossfader);
+  engine.setCueMix(mixer.cueMix);
+  if (mixer.split && !engine.setSplitCue(true)) {
+    // a mono output cannot carry two ears: fall back to normal stereo and say so
+    mixer.split = false;
+    writeSplitSetting(false);
+    toast('This device has a mono audio output, so split headphone cue is off.', { kind: 'warn', ms: 6000 });
+  }
+  showSplit();
   for (const [id, s] of Object.entries(mixer.decks)) {
     const deck = engine.decks[id];
     if (!deck) continue;
@@ -40,13 +69,33 @@ function applyMixer() {
     deck.setEq('high', s.high);
     deck.setEq('mid', s.mid);
     deck.setEq('low', s.low);
+    deck.setFilter(s.filter);
+    deck.setPfl(s.pfl);
   }
+}
+
+/** Sync the mixer controls and the settings sheet with the split-cue state. */
+function showSplit() {
+  mixerView.setSplitCue(mixer.split);
+  libraryView.setSplitCue(mixer.split, { supported: !engine.ctx || engine.splitSupported });
 }
 
 const mixerView = createMixerView($('mixer'), {
   onEq: (id, band, v) => {
     mixer.decks[id][band] = v;
     engine.decks[id]?.setEq(band, v);
+  },
+  onFilter: (id, v) => {
+    mixer.decks[id].filter = v;
+    engine.decks[id]?.setFilter(v);
+  },
+  onPfl: (id, on) => {
+    mixer.decks[id].pfl = on;
+    engine.decks[id]?.setPfl(on);
+  },
+  onCueMix: (v) => {
+    mixer.cueMix = v;
+    engine.setCueMix(v);
   },
   onVolume: (id, v) => {
     mixer.decks[id].volume = v;
@@ -90,7 +139,70 @@ async function handleFiles(files, target) {
 
 // ---- loading, analysis, grid persistence --------------------------------------------------
 
-async function loadIntoDeck(deckId, blob, item) {
+// ---- demo loops: synthesized on first use, never stored in IndexedDB ---------------------------
+
+const isDemo = (id) => typeof id === 'string' && id.startsWith('demo:');
+const DEMO_META_PREFIX = 'dj-mobile.demo.';
+const demoPcm = new Map(); // id -> Promise<channels> (the app keeps one copy; every load gets its own, since the worklet takes ownership)
+
+function demoMeta(id) {
+  try {
+    return JSON.parse(localStorage.getItem(DEMO_META_PREFIX + id)) || {};
+  } catch {
+    return {};
+  }
+}
+
+/** The demo entries shown at the top of the library: BPM and offset are known, no analysis needed. */
+function demoItems() {
+  return DEMOS.map((d) => ({
+    id: d.id,
+    name: `${d.name} (${d.bpm} BPM)`,
+    demo: true,
+    duration: demoDuration(d),
+    size: 0,
+    bpm: d.bpm,
+    beatOffset: 0,
+    bpmConfidence: 1,
+    bpmSource: 'demo',
+    hotCues: demoMeta(d.id).hotCues,
+    addedAt: Infinity,
+  }));
+}
+
+/** Loader for Deck.loadChannels: builds the demo once (a bar at a time, yielding to the UI), then hands out copies. */
+function demoProducer(id) {
+  return async (isCurrent) => {
+    const def = DEMOS.find((d) => d.id === id);
+    if (!demoPcm.has(id)) {
+      demoPcm.set(id, buildDemo(def).catch((err) => {
+        demoPcm.delete(id);
+        throw err;
+      }));
+    }
+    const pcm = await demoPcm.get(id);
+    if (!pcm || !isCurrent()) return null;
+    return { left: pcm.left.slice(), right: pcm.right.slice(), sampleRate: pcm.sampleRate, length: pcm.length, duration: pcm.duration };
+  };
+}
+
+/** Library metadata for a track; demos keep theirs (hot cues) in localStorage. */
+function saveMeta(id, patch) {
+  if (!id) return;
+  if (isDemo(id)) {
+    if (!('hotCues' in patch)) return; // a demo's tempo is fixed
+    try {
+      localStorage.setItem(DEMO_META_PREFIX + id, JSON.stringify({ ...demoMeta(id), hotCues: patch.hotCues }));
+    } catch {
+      /* not persisted: fine */
+    }
+    return;
+  }
+  library.update(id, patch);
+}
+
+/** `source` is a Blob (a stored file) or a producer function (a demo). */
+async function loadIntoDeck(deckId, source, item) {
   const deck = engine.decks[deckId];
   if (!deck) {
     toast('Start the audio engine first.', { kind: 'warn' });
@@ -98,9 +210,14 @@ async function loadIntoDeck(deckId, blob, item) {
   }
   // A track reloaded from the library reuses its stored tempo instead of re-analysing.
   const stored = item.bpm > 0 && Number.isFinite(item.beatOffset);
-  const res = await deck.loadBlob(blob, { name: item.name, libraryId: item.id }, {
+  const hooks = {
     beforeTransfer: (channels, ctl) => prepareTrack(channels, { needBpm: !stored }, () => !ctl.isCurrent()),
-  });
+  };
+  const meta = { name: item.name, libraryId: item.id };
+  const res =
+    typeof source === 'function'
+      ? await deck.loadChannels(source, meta, { ...hooks, label: 'Building demo…' })
+      : await deck.loadBlob(source, meta, hooks);
   if (res.superseded) return;
   if (!res.ok) {
     toast("Can't play this file (corrupt or unsupported format)", { kind: 'error', ms: 7000 });
@@ -108,6 +225,7 @@ async function loadIntoDeck(deckId, blob, item) {
   }
   cancelAnalysis(deckId); // only now is the previous track's analysis obsolete
   deckViews[deckId].setPeaks(res.prepared.peaks);
+  deck.setHotCues(sanitizeHotCues(item.hotCues, res.duration), { persist: false }); // restore this track's hot cues
 
   if (stored) {
     deck.setGrid(
@@ -163,7 +281,7 @@ async function runTempoAnalysis(deck, input) {
 const persistTimers = {};
 function persistGrid(deck, grid) {
   const libraryId = deck.track?.libraryId;
-  if (!libraryId || !grid) return;
+  if (!libraryId || !grid || isDemo(libraryId)) return;
   clearTimeout(persistTimers[deck.id]);
   persistTimers[deck.id] = setTimeout(() => {
     library.update(libraryId, {
@@ -173,6 +291,16 @@ function persistGrid(deck, grid) {
       bpmSource: grid.source,
     });
   }, 250);
+}
+
+// Hot cues are saved with the track's metadata whenever they change (not when they are restored on load).
+const cueTimers = {};
+function persistHotCues(deck) {
+  const libraryId = deck.track?.libraryId;
+  if (!libraryId) return;
+  const hotCues = deck.hotCues.slice();
+  clearTimeout(cueTimers[deck.id]);
+  cueTimers[deck.id] = setTimeout(() => saveMeta(libraryId, { hotCues }), 150);
 }
 
 // ---- SYNC ---------------------------------------------------------------------------------
@@ -262,7 +390,23 @@ const deckViews = {
 
 const libraryView = createLibraryView($('library'), {
   onAdd: (deck) => pickFiles(deck),
+  onSplitCue: (on) => {
+    if (on && engine.ctx && !engine.splitSupported) {
+      toast('This device has a mono audio output, so split cue is not available.', { kind: 'warn', ms: 5000 });
+      return false;
+    }
+    mixer.split = on;
+    writeSplitSetting(on);
+    engine.setSplitCue(on);
+    mixerView.setSplitCue(on);
+    return true;
+  },
   onLoad: async (id, deckId) => {
+    if (isDemo(id)) {
+      const item = demoItems().find((t) => t.id === id);
+      if (item) loadIntoDeck(deckId, demoProducer(id), item);
+      return;
+    }
     const blob = await library.getBlob(id);
     const item = (await library.list()).find((t) => t.id === id);
     if (!blob || !item) {
@@ -279,8 +423,9 @@ const libraryView = createLibraryView($('library'), {
 });
 
 async function refreshLibrary() {
-  libraryView.render(await library.list(), { persistent: library.persistent });
+  libraryView.render([...demoItems(), ...(await library.list())], { persistent: library.persistent });
 }
+showSplit(); // the saved split-cue choice (applied to the audio once the engine starts)
 
 function openLibrary(deck = null) {
   refreshLibrary();
@@ -336,6 +481,12 @@ startBtn.addEventListener('click', async () => {
       deckViews[id].attach(deck);
       deck.addEventListener('error', (e) => toast(e.detail.message, { kind: 'error' }));
       deck.addEventListener('grab', (e) => onGrabChange(deck, e));
+      deck.addEventListener('hotcues', (e) => {
+        if (e.detail.persist) persistHotCues(deck);
+      });
+      deck.addEventListener('loop', (e) => {
+        if (e.detail.reason === 'scratch') toast(`Loop on deck ${deck.id} ended: you let go outside it.`, { ms: 3000 });
+      });
       deck.addEventListener('grid', (e) => {
         updateSyncButtons();
         if (e.detail.persist) persistGrid(deck, e.detail.grid);
