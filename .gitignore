@@ -1,0 +1,16 @@
+.vscode/
+node_modules/
+.cert/
+tests/_review/
+.DS_Store
+Thumbs.db
+*.log
+# never commit audio
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.aac
+*.ogg
+*.opus
+*.aiff
