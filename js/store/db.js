@@ -3,7 +3,8 @@
 // If IndexedDB is unavailable (private mode, blocked) or a write fails (quota), the library
 // keeps working from an in-memory map for the rest of the session and calls notify().
 //
-// Metadata record: { id, name, size, type, duration|null, bpm|null, beatOffset|null, addedAt }
+// Metadata record: { id, name, size, type, duration|null, bpm|null, beatOffset|null,
+//                    bpmConfidence|null, bpmSource|null, addedAt }
 
 const DB_NAME = 'dj-mobile';
 const DB_VERSION = 1;
@@ -101,13 +102,23 @@ export class Library {
       duration: null,
       bpm: null,
       beatOffset: null,
+      bpmConfidence: null,
+      bpmSource: null,
       addedAt: Date.now(),
     };
+    // Store a plain Blob built from the bytes, not the File: iOS Safari can lose File-backed
+    // blobs in IndexedDB after a reload.
+    let blob;
+    try {
+      blob = new Blob([await file.arrayBuffer()], { type: file.type });
+    } catch {
+      blob = file;
+    }
     if (this.db) {
       try {
         const tx = this.db.transaction([META, BLOBS], 'readwrite');
         tx.objectStore(META).put(meta);
-        tx.objectStore(BLOBS).put(file, meta.id);
+        tx.objectStore(BLOBS).put(blob, meta.id);
         await txDone(tx);
         return meta;
       } catch (err) {
@@ -120,7 +131,7 @@ export class Library {
     } else {
       this._warnMemory('Storage is unavailable here, so your library will only last for this session.');
     }
-    this.memory.set(meta.id, { meta, blob: file });
+    this.memory.set(meta.id, { meta, blob });
     return { ...meta, sessionOnly: true };
   }
 

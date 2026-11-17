@@ -5,8 +5,10 @@ export const EQ_MAX_DB = 6;
 /** Fader/knob position (0..1) that maps to 0 dB. */
 export const FADER_UNITY = 0.8;
 
+/** Clamp to [lo, hi]. NaN (and anything non-numeric) maps to lo, so it can never propagate. */
 export function clamp(x, lo, hi) {
-  return x < lo ? lo : x > hi ? hi : x;
+  if (!(x >= lo)) return lo;
+  return x > hi ? hi : x;
 }
 
 export function dbToGain(db) {

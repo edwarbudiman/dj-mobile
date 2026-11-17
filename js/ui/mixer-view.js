@@ -1,61 +1,62 @@
-// Mixer panel: per-deck 3-band EQ + channel volume, master, crossfader.
+// Mixer panel (190 px wide): per-deck 3-band EQ knobs, channel volume faders, crossfader.
+// Layout:   [ EQ A ][ VOL A ][ VOL B ][ EQ B ]   four 44 px columns
+// Master volume and pitch range live in the library/settings sheet.
 // Pure view: reports changes through handlers, holds no audio objects.
 
 import { FADER_UNITY } from '../audio/mixer-math.js';
 import { createFader } from './fader.js';
+import { createKnob } from './knob.js';
 
 /**
  * @param {HTMLElement} root
  * @param {{
  *   onEq:(deck:string, band:'high'|'mid'|'low', v:number)=>void,
  *   onVolume:(deck:string, v:number)=>void,
- *   onMaster:(v:number)=>void,
  *   onCrossfader:(v:number)=>void,
  * }} h
  */
 export function createMixerView(root, h) {
   root.innerHTML = `
-    <div class="mix-eq" data-area="eqa"></div>
-    <div class="mix-eq" data-area="eqb"></div>
-    <div class="mix-levels" data-area="lv"></div>
+    <div class="mix-lib"><button type="button" class="btn btn-lib-mix">Library</button></div>
+    <div class="mix-col mix-eq deck-a" data-area="eqa"></div>
+    <div class="mix-col mix-vol deck-a" data-area="vola"></div>
+    <div class="mix-col mix-vol deck-b" data-area="volb"></div>
+    <div class="mix-col mix-eq deck-b" data-area="eqb"></div>
     <div class="mix-xf" data-area="xf"></div>`;
   const q = (a) => root.querySelector(`[data-area="${a}"]`);
-  const faders = { A: {}, B: {} };
+  const controls = { A: {}, B: {} };
 
   for (const [id, area] of [['A', 'eqa'], ['B', 'eqb']]) {
-    for (const [band, label] of [['high', 'HI'], ['mid', 'MID'], ['low', 'LOW']]) {
-      const f = createFader({
-        label: `${label} ${id}`,
-        value: FADER_UNITY,
-        defaultValue: FADER_UNITY,
-        onInput: (v) => h.onEq(id, band, v),
-      });
-      f.el.querySelector('.fader-label').textContent = label;
-      f.el.classList.add(`deck-${id.toLowerCase()}`);
-      q(area).appendChild(f.el);
-      faders[id][band] = f;
+    for (const [band, label] of [['high', 'Hi'], ['mid', 'Mid'], ['low', 'Lo']]) {
+      const k = createKnob({ label: `${label} ${id}`, value: FADER_UNITY, defaultValue: FADER_UNITY, onInput: (v) => h.onEq(id, band, v) });
+      q(area).appendChild(k.el);
+      controls[id][band] = k;
     }
   }
 
-  const lv = q('lv');
-  const volA = createFader({ label: 'VOL A', value: FADER_UNITY, defaultValue: FADER_UNITY, onInput: (v) => h.onVolume('A', v) });
-  const master = createFader({ label: 'MASTER', value: FADER_UNITY, defaultValue: FADER_UNITY, onInput: h.onMaster });
-  const volB = createFader({ label: 'VOL B', value: FADER_UNITY, defaultValue: FADER_UNITY, onInput: (v) => h.onVolume('B', v) });
-  volA.el.classList.add('deck-a');
-  volB.el.classList.add('deck-b');
-  lv.append(volA.el, master.el, volB.el);
-  faders.A.volume = volA;
-  faders.B.volume = volB;
+  for (const [id, area] of [['A', 'vola'], ['B', 'volb']]) {
+    const f = createFader({
+      label: id,
+      value: FADER_UNITY,
+      defaultValue: FADER_UNITY,
+      onInput: (v) => h.onVolume(id, v),
+    });
+    f.el.setAttribute('aria-label', `Volume ${id}`);
+    q(area).appendChild(f.el);
+    controls[id].volume = f;
+  }
 
   const xf = createFader({
-    label: 'A  ◂  CROSSFADER  ▸  B',
+    label: 'Crossfader',
     orientation: 'horizontal',
     value: 0.5,
     defaultValue: 0.5,
     snap: 0.03,
+    caption: false,
+    endLabels: ['A', 'B'],
     onInput: h.onCrossfader,
   });
   q('xf').appendChild(xf.el);
 
-  return { faders, master, crossfader: xf };
+  return { controls, crossfader: xf, libButton: root.querySelector('.btn-lib-mix') };
 }

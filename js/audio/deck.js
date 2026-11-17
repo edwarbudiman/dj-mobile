@@ -1,11 +1,13 @@
 // Main-thread side of a deck: owns the AudioWorkletNode, the per-deck EQ/volume/crossfade
-// nodes, decoding + transfer of track data, and transport logic (play, pause, seek, cue).
+// nodes, decoding + transfer of track data, transport (play, pause, seek, cue) and the tempo
+// model (beat grid, pitch, pitch bend).
 //
 // Events (EventTarget): 'loading' {loading}, 'track' {track|null}, 'playstate' {playing},
-// 'cue' {cue}, 'ended', 'error' {message}.
+// 'cue' {cue}, 'grid' {grid|null, persist}, 'pitch' {pitch, range}, 'ended', 'error' {message}.
 
 import { clamp, eqPositionToDb, faderToGain } from './mixer-math.js';
 import { estimatePosition, isNear } from './playhead-math.js';
+import { effectiveBpm, pitchToRate } from './sync-math.js';
 
 const EQ_BANDS = {
   low: { type: 'lowshelf', frequency: 250 },
@@ -13,6 +15,8 @@ const EQ_BANDS = {
   high: { type: 'highshelf', frequency: 3500 },
 };
 const SMOOTH = 0.012; // setTargetAtTime constant for control changes
+export const BEND_AMOUNT = 0.04; // pitch-bend buttons change the rate by 4 %
+const OFFSET_DECAY = 0.12; // seconds for the heard-position continuity offset to fade out
 
 function decode(ctx, arrayBuffer) {
   // Callback form: works on every Safari, unlike promise-only decodeAudioData.
@@ -30,9 +34,15 @@ export class Deck extends EventTarget {
     this.previewing = false;
     this.loading = false;
     this.cue = 0;
-    this.rate = 1;
+    this.grid = null; // { bpm, offset, confidence, source } in track time, or null
+    this.analyzing = false;
+    this.pitch = 0; // percent
+    this.pitchRange = 8; // +/- percent
+    this._bend = 0; // -1, 0, +1 while a bend button is held
     this._report = null;
     this._loadToken = 0;
+    this._latency = { at: -1, value: 0 };
+    this._off = { v: 0, t: 0 };
 
     this.node = new AudioWorkletNode(ctx, 'deck-processor', {
       numberOfInputs: 0,
@@ -76,7 +86,7 @@ export class Deck extends EventTarget {
 
   /** Crossfader contribution for this deck, linear gain 0..1. */
   setCrossfadeGain(g) {
-    this.crossfade.gain.setTargetAtTime(g, this.ctx.currentTime, SMOOTH);
+    this.crossfade.gain.setTargetAtTime(clamp(g, 0, 1), this.ctx.currentTime, SMOOTH);
   }
 
   // ---- state ----------------------------------------------------------------------------
@@ -89,9 +99,59 @@ export class Deck extends EventTarget {
     return this.track ? this.track.duration : 0;
   }
 
-  /** Current position in seconds, interpolated between worklet reports. */
+  /** True while the playhead is (or may be) moving: drives the shared redraw loop. */
+  get moving() {
+    return this.playing || (this._report !== null && this._report.speed !== 0);
+  }
+
+  /** Engine position in seconds, interpolated between worklet reports. */
   get position() {
     return estimatePosition(this._report, this.ctx.currentTime, this.duration);
+  }
+
+  /** Output latency in seconds (what the listener hears is this far behind the engine). */
+  get outputLatency() {
+    const now = this.ctx.currentTime;
+    if (now - this._latency.at > 1) {
+      let v = 0;
+      try {
+        if (this.ctx.outputLatency > 0) v = this.ctx.outputLatency;
+        else if (typeof this.ctx.getOutputTimestamp === 'function') {
+          const ts = this.ctx.getOutputTimestamp();
+          if (ts && ts.contextTime > 0) v = now - ts.contextTime;
+        }
+        if (!(v > 0)) v = this.ctx.baseLatency || 0;
+      } catch {
+        v = 0;
+      }
+      this._latency = { at: now, value: clamp(v, 0, 0.5) };
+    }
+    return this._latency.value;
+  }
+
+  _heardBase() {
+    return estimatePosition(this._report, this.ctx.currentTime - this.outputLatency, this.duration);
+  }
+
+  /**
+   * Position the listener is hearing right now: what the waveform playhead should show.
+   * The engine position leads what is heard by the output latency. When play/pause/pitch rebases
+   * the report, that lead appears or disappears; _off absorbs the difference and decays away, so
+   * this value never jumps (only a seek moves it instantly).
+   */
+  get heardPosition() {
+    const now = this.ctx.currentTime;
+    const off = this._off.v * Math.exp(-(now - this._off.t) / OFFSET_DECAY);
+    return clamp(this._heardBase() + off, 0, this.duration);
+  }
+
+  get rate() {
+    return pitchToRate(this.pitch) * (1 + this._bend * BEND_AMOUNT);
+  }
+
+  /** Base BPM x pitch, or null when the grid is unknown. */
+  get effectiveBpm() {
+    return this.grid ? effectiveBpm(this.grid.bpm, this.pitch) : null;
   }
 
   _emit(type, detail) {
@@ -102,8 +162,11 @@ export class Deck extends EventTarget {
     this.node.port.postMessage(msg, transfer || []);
   }
 
+  /** Re-anchor the position report at the current engine position with a new speed, keeping the heard position continuous. */
   _rebase(speed) {
+    const before = this.heardPosition;
     this._report = { pos: this.position, ctxTime: this.ctx.currentTime, speed };
+    this._off = { v: before - this._heardBase(), t: this.ctx.currentTime };
   }
 
   _onMessage(m) {
@@ -122,59 +185,64 @@ export class Deck extends EventTarget {
 
   /**
    * Decode a Blob/File and hand the samples to the worklet (transferred, not copied).
-   * The previous track's buffers are released by the worklet on 'load'.
    * @param {Blob} blob
    * @param {{name:string, libraryId?:string}} meta
-   * @param {{onDecoded?:(audio:AudioBuffer)=>void}} [hooks] called with the AudioBuffer before its
-   *        channel data is copied out, so later milestones can compute peaks/BPM from it.
-   * @returns {Promise<{ok:true, duration:number}|{ok:false, superseded?:true, message?:string}>}
+   * @param {{beforeTransfer?:(channels:{left:Float32Array,right:Float32Array|null,sampleRate:number,length:number,duration:number}, ctl:{isCurrent:()=>boolean})=>Promise<any>}} [hooks]
+   *        beforeTransfer runs on the copied channel data just before it is moved to the worklet
+   *        (peaks / BPM input); it must not keep references to the arrays. Its result is returned
+   *        as `prepared`; a null result means the work was aborted.
+   * @returns {Promise<{ok:true, duration:number, prepared:any}|{ok:false, superseded?:true, message?:string}>}
    */
   async loadBlob(blob, meta, hooks = {}) {
     const token = ++this._loadToken;
+    const isCurrent = () => token === this._loadToken;
     this.loading = true;
     this._emit('loading', { loading: true, name: meta.name });
     try {
       const bytes = await blob.arrayBuffer();
-      const audio = await decode(this.ctx, bytes);
-      if (token !== this._loadToken) return { ok: false, superseded: true };
+      let audio = await decode(this.ctx, bytes);
+      if (!isCurrent()) return { ok: false, superseded: true };
       if (!audio.length || !audio.numberOfChannels) throw new Error('The file contains no audio');
-      hooks.onDecoded?.(audio);
 
-      // AudioBuffer storage cannot be transferred, so copy out once, then drop the AudioBuffer.
-      const left = new Float32Array(audio.length);
+      // AudioBuffer storage cannot be transferred, so copy out once and drop the AudioBuffer.
+      const length = audio.length;
+      const sampleRate = audio.sampleRate;
+      const duration = audio.duration;
+      const left = new Float32Array(length);
       audio.copyFromChannel(left, 0);
       let right = null;
       if (audio.numberOfChannels > 1) {
-        right = new Float32Array(audio.length);
+        right = new Float32Array(length);
         audio.copyFromChannel(right, 1);
       }
-      const track = {
-        name: meta.name,
-        libraryId: meta.libraryId ?? null,
-        duration: audio.duration,
-        sampleRate: audio.sampleRate,
-        length: audio.length,
-      };
-      this._post(
-        { type: 'load', left, right, sampleRate: audio.sampleRate },
-        right ? [left.buffer, right.buffer] : [left.buffer],
-      );
+      audio = null;
+
+      const prepared = hooks.beforeTransfer ? await hooks.beforeTransfer({ left, right, sampleRate, length, duration }, { isCurrent }) : null;
+      if (!isCurrent() || (hooks.beforeTransfer && prepared === null)) return { ok: false, superseded: true };
+
+      const track = { name: meta.name, libraryId: meta.libraryId ?? null, duration, sampleRate, length };
+      this._post({ type: 'load', left, right, sampleRate }, right ? [left.buffer, right.buffer] : [left.buffer]);
       this.track = track;
       this.playing = false;
       this.previewing = false;
       this.cue = 0;
+      this.grid = null;
+      this.analyzing = false;
       this._report = { pos: 0, ctxTime: this.ctx.currentTime, speed: 0 };
+      this._off = { v: 0, t: this.ctx.currentTime };
+      this._post({ type: 'rate', value: this.rate });
       this._emit('track', { track });
       this._emit('playstate', { playing: false });
       this._emit('cue', { cue: 0 });
-      return { ok: true, duration: track.duration };
+      this._emit('grid', { grid: null, persist: false });
+      return { ok: true, duration, prepared };
     } catch (err) {
-      if (token !== this._loadToken) return { ok: false, superseded: true };
+      if (!isCurrent()) return { ok: false, superseded: true };
       const message = (err && err.message) || 'unsupported or corrupt audio file';
       this._emit('error', { message });
       return { ok: false, message };
     } finally {
-      if (token === this._loadToken) {
+      if (isCurrent()) {
         this.loading = false;
         this._emit('loading', { loading: false });
       }
@@ -211,22 +279,57 @@ export class Deck extends EventTarget {
   }
 
   seek(seconds) {
-    if (!this.track) return;
+    if (!this.track || !Number.isFinite(seconds)) return;
     const t = clamp(seconds, 0, this.duration);
     this._report = { pos: t, ctxTime: this.ctx.currentTime, speed: this.playing ? this.rate : 0 };
+    this._off = { v: 0, t: this.ctx.currentTime }; // a seek is meant to jump
     this._post({ type: 'seek', time: t });
-  }
-
-  /** Signed playback rate (1 = normal, negative = reverse). */
-  setRate(rate) {
-    this.rate = rate;
-    this._post({ type: 'rate', value: rate });
-    if (this.playing) this._rebase(rate);
   }
 
   /** Scratch hook for M3: chase `seconds`, or release with null. */
   setScratchTarget(seconds) {
+    if (seconds !== null && !Number.isFinite(seconds)) return;
     this._post({ type: 'scratch', target: seconds });
+  }
+
+  // ---- pitch / tempo ----------------------------------------------------------------------
+
+  _applyRate() {
+    this._post({ type: 'rate', value: this.rate });
+    if (this.playing) this._rebase(this.rate);
+  }
+
+  /** Pitch in percent (+8 = 8 % faster), limited to the current range. */
+  setPitch(percent) {
+    if (!Number.isFinite(percent)) return;
+    this.pitch = clamp(percent, -this.pitchRange, this.pitchRange);
+    this._applyRate();
+    this._emit('pitch', { pitch: this.pitch, range: this.pitchRange });
+  }
+
+  /** Per-deck range (8 or 16 %). Narrowing below the current pitch is refused (returns false): clamping would jump the audio. */
+  setPitchRange(range) {
+    const r = range === 16 ? 16 : 8;
+    if (Math.abs(this.pitch) > r + 1e-9) return false;
+    this.pitchRange = r;
+    this._emit('pitch', { pitch: this.pitch, range: this.pitchRange });
+    return true;
+  }
+
+  /** Hold-to-bend: direction -1 (slower), +1 (faster), 0 (release). */
+  setBend(direction) {
+    this._bend = direction > 0 ? 1 : direction < 0 ? -1 : 0;
+    this._applyRate();
+  }
+
+  /**
+   * Replace the beat grid. persist=true asks the app to store it in the library.
+   * @param {{bpm:number, offset:number, confidence?:number, source?:string}|null} grid
+   */
+  setGrid(grid, { persist = true } = {}) {
+    if (grid && !(Number.isFinite(grid.bpm) && grid.bpm > 0 && Number.isFinite(grid.offset))) return;
+    this.grid = grid ? { confidence: 1, source: 'manual', ...grid } : null;
+    this._emit('grid', { grid: this.grid, persist });
   }
 
   // ---- cue ------------------------------------------------------------------------------

@@ -47,6 +47,9 @@ try {
     ['/index.html', 'text/html'],
     ['/js/main.js', 'text/javascript'],
     ['/js/audio/deck-processor.js', 'text/javascript'],
+    ['/js/audio/bpm-worker.js', 'text/javascript'],
+    ['/js/audio/bpm-core.js', 'text/javascript'],
+    ['/js/ui/platter.js', 'text/javascript'],
     ['/css/app.css', 'text/css'],
   ];
   for (const [p, type] of cases) {
